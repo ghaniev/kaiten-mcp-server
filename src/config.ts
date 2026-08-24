@@ -64,6 +64,28 @@ const EnvSchema = z.object({
     )
     .describe('Request timeout in milliseconds'),
 
+  KAITEN_MAX_IMAGE_BYTES: z
+    .string()
+    .optional()
+    .default('8388608')
+    .transform((val) => parseInt(val, 10))
+    .refine(
+      (val) => !isNaN(val) && val >= 1024 && val <= 26214400,
+      'KAITEN_MAX_IMAGE_BYTES must be between 1024 and 26214400'
+    )
+    .describe('Maximum downloaded image size in bytes'),
+
+  KAITEN_MAX_IMAGES_PER_REQUEST: z
+    .string()
+    .optional()
+    .default('5')
+    .transform((val) => parseInt(val, 10))
+    .refine(
+      (val) => !isNaN(val) && val > 0 && val <= 10,
+      'KAITEN_MAX_IMAGES_PER_REQUEST must be between 1 and 10'
+    )
+    .describe('Maximum images returned by one MCP tool call'),
+
   // Logging configuration
   KAITEN_LOG_ENABLED: z
     .string()
@@ -124,6 +146,8 @@ function loadConfig(): EnvConfig {
     KAITEN_MAX_CONCURRENT_REQUESTS: process.env.KAITEN_MAX_CONCURRENT_REQUESTS,
     KAITEN_CACHE_TTL_SECONDS: process.env.KAITEN_CACHE_TTL_SECONDS,
     KAITEN_REQUEST_TIMEOUT_MS: process.env.KAITEN_REQUEST_TIMEOUT_MS,
+    KAITEN_MAX_IMAGE_BYTES: process.env.KAITEN_MAX_IMAGE_BYTES,
+    KAITEN_MAX_IMAGES_PER_REQUEST: process.env.KAITEN_MAX_IMAGES_PER_REQUEST,
     KAITEN_LOG_ENABLED: process.env.KAITEN_LOG_ENABLED,
     KAITEN_LOG_LEVEL: process.env.KAITEN_LOG_LEVEL,
     KAITEN_LOG_MCP_ENABLED: process.env.KAITEN_LOG_MCP_ENABLED,
@@ -213,6 +237,8 @@ safeLog.info(`   Default Space ID: ${config.KAITEN_DEFAULT_SPACE_ID || 'not set'
 safeLog.info(`   Max Concurrent Requests: ${config.KAITEN_MAX_CONCURRENT_REQUESTS}`);
 safeLog.info(`   Cache TTL: ${config.KAITEN_CACHE_TTL_SECONDS}s`);
 safeLog.info(`   Request Timeout: ${config.KAITEN_REQUEST_TIMEOUT_MS}ms`);
+safeLog.info(`   Max Image Size: ${config.KAITEN_MAX_IMAGE_BYTES} bytes`);
+safeLog.info(`   Max Images Per Request: ${config.KAITEN_MAX_IMAGES_PER_REQUEST}`);
 safeLog.info('✅ Logging configuration:');
 safeLog.info(`   Enabled: ${config.KAITEN_LOG_ENABLED}`);
 safeLog.info(`   Level: ${config.KAITEN_LOG_LEVEL}`);

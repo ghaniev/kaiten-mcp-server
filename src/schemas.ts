@@ -36,6 +36,33 @@ export const GetCardSchema = z.object({
   format: ResponseFormatEnum,
 }).strict();
 
+const AttachmentFileIdSchema = z.union([
+  z.number().positive().int(),
+  z.string().min(1),
+]);
+
+export const ListCardAttachmentsSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  images_only: z.boolean().optional().default(false)
+    .describe('Return only supported image attachments'),
+}).strict();
+
+export const GetCardImagesSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  file_ids: z.array(AttachmentFileIdSchema).max(10).optional()
+    .describe('Optional attachment IDs; omit to return the first images'),
+  limit: z.number().positive().int().max(10).optional()
+    .describe('Maximum number of images to return'),
+}).strict();
+
+export const GetTaskContextSchema = z.object({
+  card_id: z.number().positive().int().describe('The task card ID'),
+  include_images: z.boolean().optional().default(true)
+    .describe('Include supported screenshot attachments'),
+  image_limit: z.number().positive().int().max(10).optional()
+    .describe('Maximum number of screenshots to return'),
+}).strict();
+
 export const CreateCardSchema = z.object({
   title: z.string().min(1).max(500).describe('The title of the card'),
   board_id: z.number().positive().int().describe('The ID of the board where the card will be created'),
@@ -234,6 +261,9 @@ export const SetLogLevelSchema = z.object({
 // ============================================
 
 export type GetCardArgs = z.infer<typeof GetCardSchema>;
+export type ListCardAttachmentsArgs = z.infer<typeof ListCardAttachmentsSchema>;
+export type GetCardImagesArgs = z.infer<typeof GetCardImagesSchema>;
+export type GetTaskContextArgs = z.infer<typeof GetTaskContextSchema>;
 export type CreateCardArgs = z.infer<typeof CreateCardSchema>;
 export type UpdateCardArgs = z.infer<typeof UpdateCardSchema>;
 export type DeleteCardArgs = z.infer<typeof DeleteCardSchema>;

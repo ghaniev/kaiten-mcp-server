@@ -6,6 +6,8 @@ MCP сервер для интеграции Kaiten API с Claude Desktop. По�
 
 - **Карточки:** Чтение, создание, обновление, удаление, поиск
 - **Комментарии:** Полная работа с комментариями карточек
+- **Контекст задачи:** Карточка, комментарии и скриншоты одним read-only инструментом
+- **Вложения:** PNG/JPEG/WebP/GIF возвращаются как MCP image content
 - **Пространства и доски:** Навигация по структуре Kaiten
 - **Поиск:** Продвинутый поиск с фильтрами
 - **Default Space:** Автоматическая работа в выбранном пространстве
@@ -49,6 +51,8 @@ KAITEN_DEFAULT_SPACE_ID=12345  # Ваш основной space_id
 KAITEN_MAX_CONCURRENT_REQUESTS=5     # Макс. одновременных запросов (1-20)
 KAITEN_CACHE_TTL_SECONDS=300         # Время жизни кеша в секундах (0 = выкл.)
 KAITEN_REQUEST_TIMEOUT_MS=10000      # Таймаут запроса в мс (1-60000)
+KAITEN_MAX_IMAGE_BYTES=8388608       # Максимум 8 МБ на изображение
+KAITEN_MAX_IMAGES_PER_REQUEST=5      # Максимум 5 изображений за вызов
 ```
 
 **Как получить API токен:**
@@ -117,7 +121,12 @@ npm run build
 Покажи список пространств Kaiten
 ```
 
-## Доступные инструменты (26 tools)
+## Доступные инструменты
+
+### Контекст задачи и скриншоты
+- `kaiten_get_task_context` - Карточка, все комментарии и скриншоты одним вызовом
+- `kaiten_list_card_attachments` - Список вложений карточки и комментариев
+- `kaiten_get_card_images` - Получить выбранные изображения как MCP image content
 
 ### Карточки
 - `kaiten_get_card` - Получить карточку по ID **[format: json/markdown]**
@@ -478,9 +487,32 @@ KAITEN_LOG_METRICS=true
 
 - **Node.js:** Версия 20 или выше (требование `engines`)
 - **TypeScript:** 5.0+
-- **MCP SDK:** @modelcontextprotocol/sdk v1.20.0
+- **MCP SDK:** @modelcontextprotocol/sdk v1.30.0+
 - **API Client:** axios с retry/backoff и AbortSignal support
 - **Размер:** ~600 строк TypeScript, 25KB скомпилированного кода
+
+### Безопасная настройка для Codex
+
+Для анализа задач без изменения Kaiten используйте allowlist в `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.kaiten]
+command = "/absolute/path/to/node"
+args = ["/absolute/path/to/kaiten-mcp-server/dist/index.js"]
+cwd = "/absolute/path/to/kaiten-mcp-server"
+enabled = true
+enabled_tools = [
+  "kaiten_get_task_context",
+  "kaiten_get_card",
+  "kaiten_get_card_comments",
+  "kaiten_search_cards",
+  "kaiten_list_card_attachments",
+  "kaiten_get_card_images",
+]
+default_tools_approval_mode = "prompt"
+```
+
+Поддерживаются только HTTPS-ссылки без localhost и private-network адресов.
 
 ### MCP I/O Protocol
 

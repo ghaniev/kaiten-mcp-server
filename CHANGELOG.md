@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.5.0-kaiten-images.1] - 2026-08-24
+
+### Added
+- Read-only task context tool with card details, comments, and screenshots
+- Card attachment listing and MCP image-content tools
+- Legacy and restricted Kaiten file download support with MIME, size, and URL validation
+- Automated tests for attachment selection and security limits
+
+### Changed
+- Updated MCP SDK and Axios to patched versions
+- Migrated tool annotations to the current MCP hint fields
+
 ## [2.4.0] - 2025-10-22
 
 ### 🎛️ Token Economy & UX Release

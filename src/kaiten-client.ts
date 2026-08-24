@@ -5,6 +5,12 @@ import { randomBytes } from 'crypto';
 import { config, safeLog } from './config.js';
 import { logger } from './logging/index.js';
 import { setupLoggingMiddleware } from './middleware/logging-middleware.js';
+import {
+  inferImageMimeType,
+  isSafeImageDownloadUrl,
+  resolveDownloadedImageMimeType,
+  validateImageSize,
+} from './attachments.js';
 
 // ============================================
 // ENHANCED ERROR TYPES
@@ -92,6 +98,7 @@ export interface KaitenBlocker {
 
 export interface KaitenCard {
   id: number;
+  uid?: string;
   title: string;
   description?: string;
   state?: number;
@@ -122,6 +129,7 @@ export interface KaitenCard {
   comment_last_added_at?: string;
   properties?: Record<string, any>;
   custom_fields?: Record<string, any>;
+  files?: KaitenFile[];
   // Card relationships (counts from API)
   parents_count?: number;
   children_count?: number;
@@ -129,6 +137,27 @@ export interface KaitenCard {
   // Populated by additional requests
   parent_cards?: KaitenCard[];
   children_cards?: KaitenCard[];
+}
+
+export interface KaitenFile {
+  id: number | string;
+  uid?: string;
+  name: string;
+  size?: number | string | null;
+  type?: number;
+  url?: string | null;
+  mime_type?: string | null;
+  comment_id?: number | string | null;
+  comment_uid?: string | null;
+  entity_type?: 'card' | 'comment' | 'custom_property' | string;
+  deleted?: boolean;
+  external?: boolean;
+}
+
+export interface DownloadedKaitenImage {
+  file: KaitenFile;
+  data: Buffer;
+  mimeType: string;
 }
 
 export interface KaitenComment {
@@ -199,7 +228,7 @@ export class KaitenClient {
       headers: {
         'Authorization': `Bearer ${apiToken}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'mcp-kaiten/2.2.0 (+https://github.com/yourusername/mcp-kaiten)',
+        'User-Agent': 'kaiten-mcp/2.5.0-kaiten-images.1',
       },
       timeout: config.KAITEN_REQUEST_TIMEOUT_MS,
     });
@@ -391,6 +420,102 @@ export class KaitenClient {
       const response = await this.client.get(`/cards/${cardId}`, { signal });
       return response.data;
     }, signal);
+  }
+
+  async downloadCardImage(
+    card: KaitenCard,
+    file: KaitenFile,
+    signal?: AbortSignal,
+  ): Promise<DownloadedKaitenImage> {
+    const inferredMimeType = inferImageMimeType(file);
+    if (!inferredMimeType) {
+      throw new KaitenError(
+        KaitenErrorType.VALIDATION_ERROR,
+        `Unsupported image type: ${file.name}`,
+      );
+    }
+
+    validateImageSize(file, 0, config.KAITEN_MAX_IMAGE_BYTES);
+    const downloadUrl = await this.resolveFileDownloadUrl(card, file, signal);
+    this.assertSafeDownloadUrl(downloadUrl);
+
+    const response = await axios.get<ArrayBuffer>(downloadUrl, {
+      responseType: 'arraybuffer',
+      signal,
+      timeout: config.KAITEN_REQUEST_TIMEOUT_MS,
+      maxContentLength: config.KAITEN_MAX_IMAGE_BYTES,
+      maxBodyLength: config.KAITEN_MAX_IMAGE_BYTES,
+      maxRedirects: 0,
+      headers: { Accept: 'image/png,image/jpeg,image/webp,image/gif' },
+    });
+    const data = Buffer.from(response.data);
+    validateImageSize(file, data.byteLength, config.KAITEN_MAX_IMAGE_BYTES);
+
+    return {
+      file,
+      data,
+      mimeType: resolveDownloadedImageMimeType(
+        file,
+        response.headers['content-type'] == null
+          ? null
+          : String(response.headers['content-type']),
+      ),
+    };
+  }
+
+  private async resolveFileDownloadUrl(
+    card: KaitenCard,
+    file: KaitenFile,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (file.url && file.type !== 11) return file.url;
+    if (!card.uid) {
+      throw new KaitenError(
+        KaitenErrorType.VALIDATION_ERROR,
+        `Card UID is required to download restricted file ${file.name}`,
+      );
+    }
+
+    const fileId = encodeURIComponent(String(file.uid || file.id));
+    let path = `/cards/${encodeURIComponent(card.uid)}/files/${fileId}`;
+    if (file.entity_type === 'comment') {
+      if (!file.comment_uid) {
+        throw new KaitenError(
+          KaitenErrorType.VALIDATION_ERROR,
+          `Comment UID is required to download restricted file ${file.name}`,
+        );
+      }
+      path = `/cards/${encodeURIComponent(card.uid)}/comments/${encodeURIComponent(file.comment_uid)}/files/${fileId}`;
+    }
+
+    const response = await this.client.get(
+      path,
+      { params: { response_type: 'json' }, signal },
+    );
+    const url = response.data?.url;
+    if (typeof url !== 'string' || !url) {
+      throw new KaitenError(
+        KaitenErrorType.API_ERROR,
+        `Kaiten did not return a download URL for ${file.name}`,
+      );
+    }
+    return url;
+  }
+
+  private assertSafeDownloadUrl(value: string): void {
+    if (!isSafeImageDownloadUrl(value)) {
+      const hostname = (() => {
+        try {
+          return new URL(value).hostname;
+        } catch {
+          return 'invalid URL';
+        }
+      })();
+      throw new KaitenError(
+        KaitenErrorType.VALIDATION_ERROR,
+        `Unsafe image download URL returned for host ${hostname}`,
+      );
+    }
   }
 
   async createCard(params: CreateCardParams, signal?: AbortSignal): Promise<KaitenCard> {

@@ -1,6 +1,6 @@
 {
   "name": "mcp-kaiten",
-  "version": "2.4.0",
+  "version": "2.5.0-kaiten-images.1",
   "description": "MCP server for Kaiten API integration with Claude - Production-ready with Token Economy (90% savings), Verbosity control, Response formats, Logging & Monitoring",
   "main": "dist/index.js",
   "bin": {
@@ -15,7 +15,7 @@
     "dev": "tsx src/index.ts",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector dist/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run build && node --test dist/attachments.test.js"
   },
   "keywords": [
     "kaiten",
@@ -29,8 +29,8 @@
   "license": "MIT",
   "type": "module",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.20.0",
-    "axios": "^1.12.2",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "axios": "^1.19.0",
     "axios-retry": "^4.5.0",
     "dotenv": "^17.2.3",
     "lru-cache": "^11.0.2",
