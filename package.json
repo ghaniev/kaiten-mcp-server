@@ -15,7 +15,7 @@
     "dev": "tsx src/index.ts",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector dist/index.js",
-    "test": "npm run build && node --test dist/attachments.test.js"
+    "test": "npm run build && node --test dist/*.test.js"
   },
   "keywords": [
     "kaiten",
