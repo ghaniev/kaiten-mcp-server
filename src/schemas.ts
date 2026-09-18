@@ -82,14 +82,50 @@ export const UpdateCardSchema = z.object({
   title: z.string().min(1).max(500).optional().describe('The new title (optional)'),
   description: z.string().optional().describe('The new description (optional)'),
   state: z.number().optional().describe('The new state (optional)'),
+  board_id: z
+    .number()
+    .positive()
+    .int()
+    .optional()
+    .describe(
+      'Move the card to this board (optional). Columns and lanes belong to a board, so when you move a card across boards you must pass a column_id (and lane_id, if the board has several) from the TARGET board — ids from the old board are rejected.'
+    ),
   column_id: z.number().positive().int().optional().describe('Move to this column ID (optional)'),
   lane_id: z.number().positive().int().optional().describe('Move to this lane ID (optional)'),
   type_id: z.number().positive().int().optional().describe('The new type ID (optional)'),
   size: z.number().min(0).optional().describe('The new size/estimate (optional)'),
   asap: z.boolean().optional().describe('Mark as ASAP (optional)'),
-  owner_id: z.number().positive().int().optional().describe('The new owner ID (optional)'),
+  owner_id: z
+    .number()
+    .positive()
+    .int()
+    .optional()
+    .describe(
+      'The new owner ID (optional). A card cannot be left without an owner: the API rejects null with "Card.owner_id should be integer", so reassign instead of unassigning.'
+    ),
   due_date: z.string().optional().describe('New due date in ISO format (optional)'),
   idempotency_key: IdempotencyKeySchema,
+})
+  .strict()
+  // Kaiten answers 400 to board_id without a column: columns belong to a board,
+  // so the old one is not valid on the new board. Catch it before the round trip.
+  .refine((v) => v.board_id === undefined || v.column_id !== undefined, {
+    message: 'column_id is required when board_id is given — pass a column from the target board (kaiten_list_columns)',
+    path: ['column_id'],
+  });
+
+export const AddCardChildSchema = z.object({
+  card_id: z.number().positive().int().describe('The ID of the PARENT card'),
+  child_id: z.number().positive().int().describe('The ID of the card that becomes a subtask'),
+}).strict();
+
+export const RemoveCardChildSchema = z.object({
+  card_id: z.number().positive().int().describe('The ID of the PARENT card'),
+  child_id: z.number().positive().int().describe('The ID of the subtask to detach'),
+}).strict();
+
+export const ListCardChildrenSchema = z.object({
+  card_id: z.number().positive().int().describe('The ID of the parent card'),
 }).strict();
 
 export const DeleteCardSchema = z.object({
@@ -267,6 +303,9 @@ export type GetTaskContextArgs = z.infer<typeof GetTaskContextSchema>;
 export type CreateCardArgs = z.infer<typeof CreateCardSchema>;
 export type UpdateCardArgs = z.infer<typeof UpdateCardSchema>;
 export type DeleteCardArgs = z.infer<typeof DeleteCardSchema>;
+export type AddCardChildArgs = z.infer<typeof AddCardChildSchema>;
+export type RemoveCardChildArgs = z.infer<typeof RemoveCardChildSchema>;
+export type ListCardChildrenArgs = z.infer<typeof ListCardChildrenSchema>;
 export type SearchCardsArgs = z.infer<typeof SearchCardsSchema>;
 export type GetSpaceCardsArgs = z.infer<typeof GetSpaceCardsSchema>;
 export type GetBoardCardsArgs = z.infer<typeof GetBoardCardsSchema>;

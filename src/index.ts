@@ -34,6 +34,9 @@ import {
   CreateCardSchema,
   UpdateCardSchema,
   DeleteCardSchema,
+  AddCardChildSchema,
+  RemoveCardChildSchema,
+  ListCardChildrenSchema,
   SearchCardsSchema,
   GetSpaceCardsSchema,
   GetBoardCardsSchema,
@@ -766,6 +769,10 @@ RELATED TOOLS:
           type: 'number',
           description: 'New state',
         },
+        board_id: {
+          type: 'number',
+          description: 'Move to board. Requires column_id from that board (cross-space moves are allowed)',
+        },
         column_id: {
           type: 'number',
           description: 'Move to column',
@@ -1351,6 +1358,121 @@ RELATED TOOLS:
         },
       },
       required: ['card_id', 'comment_id'],
+    },
+  },
+  {
+    name: 'kaiten_add_card_child',
+    description: `Attach a card as a subtask of another card.
+
+PURPOSE: Build the parent/child structure Kaiten shows as "Subtasks NN% done". Umbrella tasks split across teams rely on it: the parent's progress counter only moves for cards linked this way, a link in the description does not count.
+
+PARAMETERS:
+- card_id (required): the PARENT card, the umbrella one.
+- child_id (required): the card that becomes a subtask.
+
+RETURNS: The child card as JSON, with parents_ids now containing the parent.
+
+USAGE EXAMPLES:
+✅ DO: Create then attach:
+  1. kaiten_create_card({title: "[QA] ...", board_id}) → child id
+  2. kaiten_add_card_child({card_id: <umbrella>, child_id: <new card>})
+✅ DO: Check the result with kaiten_get_card({card_id: <parent>}) — it lists subtasks with progress.
+
+❌ DON'T: Swap the arguments. card_id is the parent; passing them the other way round silently builds the opposite hierarchy.
+❌ DON'T: Use it for "related" cards that are not subtasks — the parent's progress counter will drift.
+
+ERRORS:
+- NOT_FOUND (404): either card does not exist.
+- AUTH_ERROR (403): no write access to the parent's space.
+
+NOTES:
+- A card may have several parents; adding a second one does not replace the first.
+- Cross-space links are allowed: parent and child may live in different spaces.`,
+    annotations: {
+      title: 'Add Subtask Link',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: {
+          type: 'number',
+          description: 'Parent card ID',
+        },
+        child_id: {
+          type: 'number',
+          description: 'Child card ID',
+        },
+      },
+      required: ['card_id', 'child_id'],
+    },
+  },
+  {
+    name: 'kaiten_remove_card_child',
+    description: `Detach a subtask from its parent card. The child card itself is not deleted.
+
+PURPOSE: Undo a link made by kaiten_add_card_child, or move a subtask under a different umbrella (detach, then attach elsewhere).
+
+PARAMETERS:
+- card_id (required): the PARENT card.
+- child_id (required): the subtask to detach.
+
+RETURNS: Confirmation text. Nothing is deleted except the relation.
+
+❌ DON'T: Use this to delete a card — it only breaks the link. Use kaiten_delete_card for that.`,
+    annotations: {
+      title: 'Remove Subtask Link',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: {
+          type: 'number',
+          description: 'Parent card ID',
+        },
+        child_id: {
+          type: 'number',
+          description: 'Child card ID',
+        },
+      },
+      required: ['card_id', 'child_id'],
+    },
+  },
+  {
+    name: 'kaiten_list_card_children',
+    description: `List the subtasks of a card in compact form.
+
+PURPOSE: See what is attached to an umbrella card without pulling the full parent card. Returns id, title, state and owner per subtask, so it is far cheaper than kaiten_get_card when you only need the structure.
+
+PARAMETERS:
+- card_id (required): the parent card.
+
+RETURNS: JSON array: id, title, state (1=queued, 2=in progress, 3=done), owner_id, board_id, column_id.
+
+Empty array [] when the card has no subtasks.`,
+    annotations: {
+      title: 'List Subtasks',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: {
+          type: 'number',
+          description: 'Parent card ID',
+        },
+      },
+      required: ['card_id'],
     },
   },
   {
@@ -2919,6 +3041,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (validatedArgs.title) params.title = validatedArgs.title;
         if (validatedArgs.description !== undefined) params.description = validatedArgs.description;
         if (validatedArgs.state !== undefined) params.state = validatedArgs.state;
+        if (validatedArgs.board_id) params.board_id = validatedArgs.board_id;
         if (validatedArgs.column_id) params.column_id = validatedArgs.column_id;
         if (validatedArgs.lane_id) params.lane_id = validatedArgs.lane_id;
         if (validatedArgs.type_id) params.type_id = validatedArgs.type_id;
@@ -2946,6 +3069,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text' as const,
               text: `Card ${validatedArgs.card_id} deleted successfully`,
+            },
+          ],
+        };
+      }
+
+      case 'kaiten_add_card_child': {
+        const validatedArgs = AddCardChildSchema.parse(args);
+        const card = await kaitenClient.addCardChild(validatedArgs.card_id, validatedArgs.child_id, signal);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(card, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'kaiten_remove_card_child': {
+        const validatedArgs = RemoveCardChildSchema.parse(args);
+        await kaitenClient.removeCardChild(validatedArgs.card_id, validatedArgs.child_id, signal);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Card ${validatedArgs.child_id} detached from ${validatedArgs.card_id}. The card itself was not deleted.`,
+            },
+          ],
+        };
+      }
+
+      case 'kaiten_list_card_children': {
+        const validatedArgs = ListCardChildrenSchema.parse(args);
+        const children = await kaitenClient.getCardChildren(validatedArgs.card_id, signal);
+        // Compact on purpose: the full card payload is dominated by base64 avatars.
+        const compact = children.map((c: any) => ({
+          id: c.id,
+          title: c.title,
+          state: c.state,
+          owner_id: c.owner_id,
+          board_id: c.board_id,
+          column_id: c.column_id,
+        }));
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(compact, null, 2),
             },
           ],
         };
