@@ -197,6 +197,7 @@ export interface UpdateCardParams {
   title?: string;
   description?: string;
   state?: number;
+  board_id?: number;
   column_id?: number;
   lane_id?: number;
   type_id?: number;
@@ -546,6 +547,7 @@ export class KaitenClient {
     }, signal);
   }
 
+
   // Get cards from a board
   async getCardsFromBoard(
     boardId: number,
@@ -699,11 +701,25 @@ export class KaitenClient {
     }, signal);
   }
 
-  // Card relationships
+  // Card relationships. Kaiten keeps the relation on the parent, so every call is
+  // addressed to the parent and names the child in the body or in the path.
   async getCardChildren(cardId: number, signal?: AbortSignal): Promise<KaitenCard[]> {
     return this.queuedRequest(async () => {
       const response = await this.client.get(`/cards/${cardId}/children`, { signal });
       return response.data;
+    }, signal);
+  }
+
+  async addCardChild(cardId: number, childId: number, signal?: AbortSignal): Promise<KaitenCard> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.post(`/cards/${cardId}/children`, { card_id: childId }, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async removeCardChild(cardId: number, childId: number, signal?: AbortSignal): Promise<void> {
+    return this.queuedRequest(async () => {
+      await this.client.delete(`/cards/${cardId}/children/${childId}`, { signal });
     }, signal);
   }
 
