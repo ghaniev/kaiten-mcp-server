@@ -157,6 +157,17 @@ export function formatAsMarkdown(data: any, title?: string): string {
   return formatObjectAsMarkdown(data);
 }
 
+/** One-line rendering of a small object, for list items inside markdown. */
+export function formatInline(value: any): string {
+  if (value === null || value === undefined) return '—';
+  if (typeof value !== 'object') return String(value);
+  if (Array.isArray(value)) return value.map(formatInline).join(', ');
+  return Object.entries(value)
+    .filter(([, v]) => v !== null && v !== undefined)
+    .map(([k, v]) => `${k}: ${typeof v === 'object' ? formatInline(v) : v}`)
+    .join(', ');
+}
+
 function formatObjectAsMarkdown(obj: any): string {
   let markdown = '';
 
@@ -169,7 +180,17 @@ function formatObjectAsMarkdown(obj: any): string {
       markdown += `\n**${label}:**\n`;
       markdown += formatObjectAsMarkdown(value);
     } else if (Array.isArray(value)) {
-      markdown += `**${label}:** ${value.join(', ')}\n`;
+      if (value.length === 0) {
+        markdown += `**${label}:** —\n`;
+      } else if (value.some((item) => item !== null && typeof item === 'object')) {
+        // join() on objects prints "[object Object]"; list them instead.
+        markdown += `**${label}:**\n`;
+        for (const item of value) {
+          markdown += `- ${formatInline(item)}\n`;
+        }
+      } else {
+        markdown += `**${label}:** ${value.join(', ')}\n`;
+      }
     } else {
       markdown += `**${label}:** ${value}\n`;
     }

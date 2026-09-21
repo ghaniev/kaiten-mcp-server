@@ -1,5 +1,85 @@
 # Changelog
 
+## [Unreleased] - 2026-09-21
+
+Ветка `feat/card-ops-and-compact-responses`. Всё, что ниже, проверено живым API
+`vibegames.kaiten.ru` (чтением и одноразовыми карточками) — детали в README, раздел
+«Особенности Kaiten API».
+
+### Added
+- **Ответственный как отдельное понятие.** Исполнитель в Kaiten — участник карточки с
+  `type: 2`, а не `owner`. Новые инструменты: `kaiten_list_card_members`,
+  `kaiten_set_card_responsible`, `kaiten_remove_card_responsible`, `kaiten_add_card_member`,
+  `kaiten_remove_card_member`. Назначение делает POST, перечитывает роль и чинит её через
+  PATCH, потому что API не гарантирует переданный `type`; прежний ответственный возвращается
+  в поле `demoted`.
+- **Блокеры:** `kaiten_list_card_blockers`, `kaiten_block_card` (причиной или карточкой),
+  `kaiten_unblock_card` (по id записи блокера или все сразу).
+- **Порядок карточек:** `kaiten_set_card_order` (до/после карточки, в начало/конец колонки) и
+  `kaiten_reorder_cards` (порядок для списка одним вызовом, с переиспользованием занятых
+  позиций).
+- **Массовые операции:** `kaiten_bulk_move_cards`, `kaiten_bulk_set_due_date`,
+  `kaiten_bulk_set_responsible` — одна ошибка не роняет пакет, результат по каждой карточке.
+- **Поиск по человеку:** `kaiten_find_cards_by_user` с ролями responsible / member / any /
+  owner и честной пагинацией (роль фильтруется на клиенте — серверного фильтра нет).
+- **Переименование доски:** `kaiten_update_board` через `/spaces/{spaceId}/boards/{id}`.
+- `kaiten_create_card` принимает `responsible_id`, `member_ids` и `size_text`;
+  `kaiten_update_card` — `size_text`, `sort_order` и `due_date: null`.
+
+### Changed
+- **Размер ответов.** Все инструменты, возвращающие карточку, отдают компактную проекцию
+  (id, title, url, board/column/lane, state, due_date, size_text, owner, responsible, members
+  с ролями, blocked, счётчики parents/children). Аватарки вырезаются всегда, включая
+  `verbose: true` и вложенные объекты. `kaiten_update_card`: 7 698 → 1 129 байт,
+  `kaiten_get_card(format: json)`: 77 120 → 1 551 байт.
+- **Честная пагинация.** `kaiten_search_cards`, `kaiten_get_board_cards`,
+  `kaiten_get_space_cards`, `kaiten_list_users`, `kaiten_find_cards_by_user` дочитывают список
+  страницами по 100 и печатают `has_more` / `next_offset`. Лимит поднят с 20 до 500.
+- Оценка пишется через `size_text` и перечитывается; переданный `size` вызывает предупреждение.
+- Несовпадение `state` с типом колонки и неснявшийся `due_date` попадают в `warnings`.
+- Ошибки API теперь доносят сообщение Kaiten («It is currently not allowed to change a due
+  date of completed cards») вместо `UNKNOWN_ERROR: Request failed with status code 400`.
+
+### Fixed
+- `kaiten_get_board` отдавал сырой объект доски, а `GET /boards/{id}` вкладывает в него
+  **все карточки доски**: 2.7 МБ на доске из 43 карточек. Теперь возвращается структура
+  (колонки с типами, дорожки, счётчик карточек) — 918 байт.
+- `kaiten_get_current_user` отдавал 19 КБ: аватарка, матрицы прав, все настройки уведомлений.
+  Теперь 188 байт.
+- `formatAsMarkdown` печатал массив объектов как `[object Object]` — видно было на колонках и
+  дорожках доски.
+- `kaiten_get_board_cards` ходил в `/boards/{id}/cards`, который на этом инстансе отвечает
+  **404**, — инструмент был нерабочим. Теперь идёт через `/cards?board_id=`.
+
+### Fixed (найдено ревью диффа и живым прогоном)
+- `kaiten_find_cards_by_user` отдавал `next_offset` концом прочитанной страницы, а не позицией
+  первой невозвращённой карточки: продолжение с этого offset перепрыгивало все совпадения,
+  найденные в той же странице после лимита.
+- Он же говорил `has_more: false`, когда список прочитан до конца, но совпадений нашлось больше
+  лимита (19 карточек, отдали 3, сказали «это всё»).
+- `searchCardsPaged` / `getUsersPaged` при упоре в лимит числа запросов отвечали
+  `has_more: false` — ровно та молчаливая обрезка, ради которой всё это писалось.
+- `kaiten_set_card_responsible` при роли, которая не записалась, возвращал прежнего
+  ответственного в поле `responsible` и считался успехом в пакетной операции; теперь это ошибка.
+- `kaiten_add_card_member` считал успехом случай, когда участник не появился на карточке.
+- POST участника ловил любую ошибку (403/404/5xx) и превращал её в предупреждение; теперь
+  проглатывается только 400/409/422 («уже участник»), остальное пробрасывается.
+- `idempotency_key` принимался схемой и обещался в описании, но не доходил до запроса —
+  повтор создавал дубль карточки.
+- `kaiten_create_comment` / `kaiten_update_comment` отдавали сырой комментарий с base64-аватаркой
+  автора (~2 КБ): 133 байта вместо этого.
+- `card_ids` с повторами приводил к двум одновременным PATCH одной карточки и к двум карточкам
+  на одной позиции при сортировке — теперь отклоняется схемой.
+- `kaiten_cache_invalidate_users` стал пустышкой, когда `kaiten_list_users` перестал заполнять
+  кеш; кеш для запроса без фильтра восстановлен.
+- `kaiten_reorder_cards` считал карточку неудачной при любом округлении `sort_order` со стороны
+  Kaiten (сравнение float на строгое равенство).
+- `responsible_id`, продублированный в `member_ids`, отправлял POST с `type: 1` сразу после
+  назначения ответственного; теперь такой id из списка участников убирается.
+
+### Tests
+- 10 → 95 тестов (`npm test`), сеть не используется: axios-адаптер и клиент замоканы.
+
 ## [2.5.0-kaiten-images.1] - 2026-08-24
 
 ### Added
