@@ -28,7 +28,34 @@ import {
   KaitenBoard,
   KaitenComment,
   KaitenError,
+  KaitenBlockerRecord,
+  SearchCardsParams,
+  KAITEN_PAGE_SIZE,
 } from './kaiten-client.js';
+import {
+  CardViewContext,
+  projectCard,
+  projectBoard,
+  projectCardBrief,
+  projectCards,
+  projectKaitenUser,
+  renderCardLine,
+  stripAvatars,
+  webBaseUrl,
+} from './card-view.js';
+import type { BulkResult } from './card-ops.js';
+import {
+  addCardParticipant,
+  bulkSetResponsible,
+  bulkUpdateCards,
+  describeError,
+  findCardsByUser,
+  listCardMembers,
+  planReorder,
+  planSortOrder,
+  removeCardMember as removeCardMemberOp,
+  setCardResponsible,
+} from './card-ops.js';
 import {
   GetCardSchema,
   CreateCardSchema,
@@ -55,10 +82,24 @@ import {
   ListCardAttachmentsSchema,
   GetCardImagesSchema,
   GetTaskContextSchema,
+  ListCardMembersSchema,
+  SetCardResponsibleSchema,
+  RemoveCardResponsibleSchema,
+  AddCardMemberSchema,
+  RemoveCardMemberSchema,
+  ListCardBlockersSchema,
+  BlockCardSchema,
+  UnblockCardSchema,
+  SetCardOrderSchema,
+  ReorderCardsSchema,
+  BulkMoveCardsSchema,
+  BulkSetDueDateSchema,
+  BulkSetResponsibleSchema,
+  FindCardsByUserSchema,
+  UpdateBoardSchema,
 } from './schemas.js';
 import {
   truncateResponse,
-  applyCardVerbosity,
   applyUserVerbosity,
   applyBoardVerbosity,
   applyResponseFormat,
@@ -83,6 +124,82 @@ const kaitenClient = new KaitenClient(API_URL, API_TOKEN);
 
 // Initialize MCP logger (will be set when server is ready)
 const mcpLogger = logger.getMCPLogger();
+
+// Every card-shaped answer goes through the compact projection in card-view.ts;
+// this is the context it needs to build card URLs.
+const cardCtx: CardViewContext = {
+  baseUrl: webBaseUrl(API_URL!),
+  defaultSpaceId: DEFAULT_SPACE_ID,
+};
+
+/** One card, compact by default; `verbose` returns the raw object minus avatars. */
+function renderCard(card: KaitenCard, verbose: boolean, withDescription = true) {
+  return verbose ? stripAvatars(card) : projectCard(card, cardCtx, { description: withDescription });
+}
+
+function jsonContent(payload: unknown) {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: truncateResponse(JSON.stringify(payload, null, 2)),
+      },
+    ],
+  };
+}
+
+/** A blocker record without the service fields; `id` is what releases it. */
+function projectBlocker(record: KaitenBlockerRecord | any) {
+  return {
+    id: record?.id,
+    reason: record?.reason ?? null,
+    blocker_card_id: record?.blocker_card_id ?? null,
+    blocker_card_title: record?.blocker_card_title ?? null,
+    blocked_by: record?.blocker
+      ? { id: record.blocker.id, full_name: record.blocker.full_name ?? null }
+      : record?.blocker_id
+        ? { id: record.blocker_id, full_name: null }
+        : null,
+    created: record?.created ?? null,
+    released: !!record?.released,
+  };
+}
+
+/** Bulk answer with cards projected — 100 raw cards would be megabytes. */
+function renderBulk(result: BulkResult) {
+  return {
+    updated: result.updated,
+    failed: result.failed,
+    results: result.results.map((item) =>
+      item.ok && item.card
+        ? { card_id: item.card_id, ok: true, card: projectCardBrief(item.card) }
+        : { card_id: item.card_id, ok: item.ok, error: item.error }
+    ),
+    warnings: [...result.warnings],
+  };
+}
+
+/**
+ * Footer every list answer carries, so a truncated list never looks complete.
+ * Kaiten caps list responses at 100 rows without saying so — this is the fix
+ * for "the board has 312 cards but the tool showed 100 and claimed that was all".
+ */
+function paginationFooter(opts: {
+  returned: number;
+  requested: number;
+  has_more: boolean;
+  next_offset: number | null;
+  scanned?: number;
+}): string {
+  let footer = `\nReturned ${opts.returned} card(s) of the ${opts.requested} requested`;
+  if (opts.scanned !== undefined) footer += `, scanned ${opts.scanned}`;
+  footer += `.\nhas_more: ${opts.has_more}`;
+  if (opts.has_more && opts.next_offset !== null) {
+    footer += ` — more cards match; repeat with skip=${opts.next_offset} or raise limit`;
+  }
+  footer += `\n`;
+  return footer;
+}
 
 // ============================================
 // HELPER FUNCTIONS (IMPROVED TYPING)
@@ -238,25 +355,6 @@ function simplifyCard(card: KaitenCard): SimplifiedCard {
   };
 }
 
-// Compact version for search results - only essential fields
-function simplifyCardCompact(card: KaitenCard) {
-  const baseUrl = API_URL!.replace('/api/latest', '');
-  const spaceId = card.space_id || card.board?.space_id || DEFAULT_SPACE_ID || '';
-  const cardUrl = `${baseUrl}/space/${spaceId}/card/${card.id}`;
-
-  return {
-    id: card.id,
-    title: card.title,
-    url: cardUrl,
-    board_title: card.board?.title || null,
-    owner_name: card.owner?.full_name || null,
-    updated: card.updated,
-    asap: card.asap || false,
-    blocked: !!card.blocked,
-  };
-}
-
-
 // ============================================
 // RESOURCE TEMPLATES
 // ============================================
@@ -318,8 +416,21 @@ Search Strategy:
 Card Operations:
 • Create: title + board_id required. Find board_id via kaiten_list_boards
 • Update: only include fields to change
-• Assign: find user via kaiten_list_users(query="name"), use their ID in owner_id
 • Comments: support markdown, appear in card history
+• Bulk: kaiten_bulk_move_cards / kaiten_bulk_set_due_date / kaiten_bulk_set_responsible instead of N single calls
+
+ASSIGNEE vs OWNER (the one thing to get right):
+• The assignee is a card MEMBER with type 2 ("responsible"). owner_id is who SET the task.
+• Assign with kaiten_set_card_responsible, read with kaiten_list_card_members, search with kaiten_find_cards_by_user.
+• A card holds at most one responsible; assigning a new one demotes the previous.
+
+Estimates: only size_text is stored ("8 ч"). size/size_unit are accepted with 200 and silently dropped.
+
+State: Kaiten derives state from the column type, so "done" = move to a done-type column (kaiten_list_columns shows the type) and pass state: 3 in the same call.
+
+Pagination: the API caps every list at 100 rows without saying so. These tools page through and always report has_more / next_offset — trust that footer, not the row count.
+
+Response size: cards come back as a compact projection (no avatars, no nested child cards). Pass verbose: true only when a rare field is genuinely needed.
 
 Users:
 • CRITICAL: Kaiten stores LATIN names only
@@ -2011,9 +2122,11 @@ PARAMETERS:
   • Use 'json' when: Need structured data for programmatic processing, integrations, parsing
   • Use 'markdown' when: Human-readable display with formatting, showing to user - DEFAULT
 
-RETURNS:
-- With format='markdown' (default): Human-readable markdown format with board details
-- With format='json': Full board object as JSON with all fields`,
+RETURNS: The board's structure — title, description, columns (id, title, type: 1=queue, 2=in progress, 3=done), lanes, and cards_total.
+- With format='markdown' (default): the same, human-readable
+- With format='json': the same as JSON
+
+NOTE: the raw API object embeds every card of the board (2.7 MB on a 43-card board), so the cards are left out here. Use kaiten_get_board_cards for them.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -2401,7 +2514,8 @@ USAGE EXAMPLES:
 
 ✅ DO: Get your user_id for filtering:
   1. kaiten_get_current_user() → get your id
-  2. kaiten_search_cards({owner_id: <your_id>}) → find "my cards"
+  2. kaiten_find_cards_by_user({user_id: <your_id>, role: "responsible"}) → cards assigned to you
+     (owner_id finds cards you CREATED, which is a different question)
 
 ✅ DO: Check account activation:
   kaiten_get_current_user() → verify activated: true
@@ -2534,6 +2648,316 @@ RELATED TOOLS:
           description: 'Detail level: minimal (ID+name), normal (default, +email/username), detailed (full)',
         },
       },
+    },
+  },
+  // ============================================
+  // MEMBERS / RESPONSIBLE
+  // ============================================
+  {
+    name: 'kaiten_list_card_members',
+    description: `List the people on a card with their roles.
+
+WHY THIS EXISTS: in Kaiten the assignee is a card MEMBER with type 2 ("responsible"), not the card owner. The owner is who created or requested the task. Workload per person is counted by the responsible, so reading owner_id instead of the members list gives the wrong answer.
+
+RETURNS: {card_id, responsible, members: [{id, full_name, role, type}]} - role is "responsible" (type 2) or "member" (type 1). No avatars.
+
+RELATED: kaiten_set_card_responsible, kaiten_add_card_member, kaiten_find_cards_by_user`,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: { card_id: { type: 'number', description: 'Card ID' } },
+      required: ['card_id'],
+    },
+  },
+  {
+    name: 'kaiten_set_card_responsible',
+    description: `Make a user the responsible person (member with type 2) of a card. This is "assign the task".
+
+HOW IT WORKS: POST /cards/{id}/members {user_id, type: 2}, then the members list is read back and PATCHed if the role did not stick - the API has been seen to store type 1 for a type 2 request.
+
+SIDE EFFECT: a card holds at most one responsible. The previous one is downgraded to an ordinary member by Kaiten itself and is reported in "demoted". Do not try to demote them by hand: PATCH with type 1 answers 400 "Member.type should be >= 2".
+
+RETURNS: {card_id, responsible, demoted, members, warnings}
+
+ERRORS: if the user has no access to the space, POST answers 400 "space.card.update permission is required" and the tool reports that the user never became a member.`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        user_id: { type: 'number', description: 'User who becomes responsible' },
+      },
+      required: ['card_id', 'user_id'],
+    },
+  },
+  {
+    name: 'kaiten_remove_card_responsible',
+    description: `Take the responsible person off a card.
+
+Kaiten cannot turn a responsible into an ordinary participant (PATCH type 1 answers 400 "Member.type should be >= 2"), so the only way to clear the role is to remove that member from the card. If you meant to hand the task over, use kaiten_set_card_responsible with the new person instead - it does the swap in one step.
+
+RETURNS: {card_id, removed, members} - or a no-op result when the card had no responsible.`,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: { card_id: { type: 'number', description: 'Card ID' } },
+      required: ['card_id'],
+    },
+  },
+  {
+    name: 'kaiten_add_card_member',
+    description: `Add an ordinary participant (member type 1) to a card.
+
+TRAP: if the card has no responsible yet, Kaiten promotes the new member to type 2 whatever the request says, and that cannot be undone by PATCH. The tool reads the result back and reports it in "warnings" instead of claiming success.
+
+RETURNS: {card_id, members, responsible, warnings}`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        user_id: { type: 'number', description: 'User to add' },
+      },
+      required: ['card_id', 'user_id'],
+    },
+  },
+  {
+    name: 'kaiten_remove_card_member',
+    description: `Remove a user from a card's members, whatever their role.
+
+RETURNS: {card_id, members, responsible}. Removing someone who is not a member answers 200 and changes nothing.`,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        user_id: { type: 'number', description: 'User to remove' },
+      },
+      required: ['card_id', 'user_id'],
+    },
+  },
+
+  // ============================================
+  // BLOCKERS
+  // ============================================
+  {
+    name: 'kaiten_list_card_blockers',
+    description: `List what blocks a card.
+
+Two kinds: a blocker CARD (blocker_card_id) and a free-text reason. The API returns the whole history, including released blockers; this tool returns only the active ones unless include_released is true.
+
+RETURNS: [{id, reason, blocker_card_id, blocker_card_title, blocked_by, created, released}] - "id" is the BLOCKER RECORD id, which is what kaiten_unblock_card takes.`,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        include_released: { type: 'boolean', description: 'Also return already released blockers' },
+      },
+      required: ['card_id'],
+    },
+  },
+  {
+    name: 'kaiten_block_card',
+    description: `Block a card - either with a text reason or with another card.
+
+PARAMETERS: exactly one of
+- reason: free text, e.g. "ждём ответ от бэка"
+- blocker_card_id: the card that blocks this one
+
+RETURNS: the created blocker record {id, reason, blocker_card_id, ...}. Keep "id": releasing takes the record id, not a card id.
+
+ERRORS: 403 "User with id N dont have access to blocker card with id M" - the token cannot see the blocking card.`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card to block' },
+        reason: { type: 'string', description: 'Free-text reason' },
+        blocker_card_id: { type: 'number', description: 'Blocking card ID' },
+      },
+      required: ['card_id'],
+    },
+  },
+  {
+    name: 'kaiten_unblock_card',
+    description: `Release a blocker.
+
+PARAMETERS: blocker_id - the id of the BLOCKER RECORD from kaiten_list_card_blockers (not the id of the blocking card); or all: true to release every active blocker of the card.
+
+The record is not deleted, it is marked released; the card's blocked flag clears.`,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Blocked card ID' },
+        blocker_id: { type: 'number', description: 'Blocker record ID' },
+        all: { type: 'boolean', description: 'Release every active blocker' },
+      },
+      required: ['card_id'],
+    },
+  },
+
+  // ============================================
+  // ORDER
+  // ============================================
+  {
+    name: 'kaiten_set_card_order',
+    description: `Move one card up or down inside its column.
+
+Position in a column is the float field sort_order (ascending). This tool reads the column, computes a value between the neighbours and writes it, so you never have to invent numbers.
+
+PARAMETERS: exactly one of
+- before_card_id / after_card_id: place relative to another card of the same column
+- position: "top" or "bottom"
+- sort_order: raw value, when you know what you want
+
+RETURNS: the moved card (compact) plus the column order after the move. Cards that share a sort_order make an exact insert impossible - that is reported in warnings, and kaiten_reorder_cards renumbers the column deterministically.`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card to move' },
+        before_card_id: { type: 'number', description: 'Put it before this card' },
+        after_card_id: { type: 'number', description: 'Put it after this card' },
+        position: { type: 'string', description: '"top" or "bottom"' },
+        sort_order: { type: 'number', description: 'Raw sort_order value' },
+      },
+      required: ['card_id'],
+    },
+  },
+  {
+    name: 'kaiten_reorder_cards',
+    description: `Set the order of a whole list of cards in one call - e.g. sort a column by due date.
+
+By default the cards keep the slots they already occupy: their current sort_order values are collected, sorted and handed back out in the requested order, so cards that were not listed stay where they are. Pass start_at (and optionally step) to renumber from scratch instead.
+
+PARAMETERS: card_ids - the cards in the order you want them, top first.
+
+RETURNS: {updated, failed, results: [{card_id, sort_order, ok}]}`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_ids: { type: 'array', items: { type: 'number' }, description: 'Cards in the desired order' },
+        start_at: { type: 'number', description: 'Renumber from this value instead of reusing existing slots' },
+        step: { type: 'number', description: 'Distance between neighbours when start_at is given (default 1)' },
+      },
+      required: ['card_ids'],
+    },
+  },
+
+  // ============================================
+  // BULK
+  // ============================================
+  {
+    name: 'kaiten_bulk_move_cards',
+    description: `Move many cards to a column / lane / board in one call.
+
+One PATCH per card, failures isolated per card, compact answer (no full card objects). Use this instead of N kaiten_update_card calls.
+
+STATE: Kaiten derives state from the column type, so "done" means moving to a done-type column (kaiten_list_columns shows type: 1=queue, 2=in progress, 3=done). Pass state together with a column_id of that type; state on its own is rejected here, because Kaiten would answer 200 and change nothing. A state that still does not match after the move is reported in warnings.
+
+RETURNS: {updated, failed, results: [{card_id, ok, card or error}], warnings}`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_ids: { type: 'array', items: { type: 'number' }, description: 'Cards to move (1-100)' },
+        column_id: { type: 'number', description: 'Target column' },
+        board_id: { type: 'number', description: 'Target board (then column_id must belong to it)' },
+        lane_id: { type: 'number', description: 'Target lane' },
+        state: { type: 'number', description: '1=queued, 2=in progress, 3=done' },
+      },
+      required: ['card_ids'],
+    },
+  },
+  {
+    name: 'kaiten_bulk_set_due_date',
+    description: `Set or clear the due date on many cards in one call.
+
+due_date: ISO string, or null to clear it (the API accepts null here).
+
+RETURNS: {updated, failed, results: [{card_id, ok, card or error}]}`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_ids: { type: 'array', items: { type: 'number' }, description: 'Cards to update (1-100)' },
+        due_date: { type: ['string', 'null'], description: 'ISO date or null' },
+      },
+      required: ['card_ids', 'due_date'],
+    },
+  },
+  {
+    name: 'kaiten_bulk_set_responsible',
+    description: `Make one user the responsible person on many cards.
+
+Runs the full set-responsible dance per card (POST, read back, PATCH if needed), so the role really lands. Previous responsibles are reported per card in "demoted".
+
+RETURNS: {updated, failed, results: [{card_id, ok, responsible, demoted, error}]}`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_ids: { type: 'array', items: { type: 'number' }, description: 'Cards to assign (1-100)' },
+        user_id: { type: 'number', description: 'User who becomes responsible' },
+      },
+      required: ['card_ids', 'user_id'],
+    },
+  },
+
+  // ============================================
+  // CARDS BY PERSON
+  // ============================================
+  {
+    name: 'kaiten_find_cards_by_user',
+    description: `All cards where a person is the responsible (default), a participant, either, or the owner.
+
+WHY: Kaiten's member_ids filter matches any role, and there is no server-side "responsible = X" filter, so the role is applied client side over paged results. The answer says how many cards were scanned and whether the scan stopped early - it never pretends to be complete when it is not.
+
+PARAMETERS:
+- user_id (required): from kaiten_list_users(query="latin name")
+- role: responsible (default), member, any, owner
+- board_id / space_id / state / condition: narrow the scan, strongly recommended
+- limit (default 50), max_scan (default 500)
+
+RETURNS: compact card lines plus {matched, scanned, has_more, next_offset}`,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        user_id: { type: 'number', description: 'User ID' },
+        role: { type: 'string', description: 'responsible | member | any | owner' },
+        board_id: { type: 'number', description: 'Restrict to one board' },
+        space_id: { type: 'number', description: 'Restrict to one space' },
+        state: { type: 'number', description: '1=queued, 2=in progress, 3=done' },
+        condition: { type: 'number', description: '1=active (default), 2=archived' },
+        limit: { type: 'number', description: 'Matching cards to return (default 50)' },
+        skip: { type: 'number', description: 'Resume from this offset (next_offset from the previous answer)' },
+        max_scan: { type: 'number', description: 'Cards to read while filtering (default 500)' },
+        verbose: { type: 'boolean', description: 'Full card objects instead of the projection' },
+      },
+      required: ['user_id'],
+    },
+  },
+  {
+    name: 'kaiten_update_board',
+    description: `Rename a board (or change its description).
+
+PATH TRAP: boards are read at /boards/{id} but written at /spaces/{space_id}/boards/{id} - a PATCH to the short path answers 404, which is why space_id is required here. (Columns are the mirror image: they live under /boards/{id}/columns/{id}.)
+
+RETURNS: {id, title, space_id}`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        space_id: { type: 'number', description: 'Space the board belongs to' },
+        board_id: { type: 'number', description: 'Board to update' },
+        title: { type: 'string', description: 'New title' },
+        description: { type: 'string', description: 'New description' },
+      },
+      required: ['space_id', 'board_id'],
     },
   },
   {
@@ -2814,26 +3238,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Check format parameter
         const format = validatedArgs.format || 'markdown';
 
-        // If JSON format requested, return simplified card directly
+        // JSON: the compact projection. The raw card is 8-77 KB, mostly base64
+        // avatars and whole child cards; verbose=true returns it minus avatars.
         if (format === 'json') {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: JSON.stringify(card, null, 2),
-              },
-            ],
-          };
+          return jsonContent(renderCard(card, validatedArgs.verbose));
         }
 
         // Markdown format (default)
+        const projected = projectCard(card, cardCtx);
         let output = `# ${simplified.title}\n\n`;
         output += `🔗 ${simplified.url}\n`;
         output += `📋 Board: ${simplified.board_title || 'N/A'}`;
         if (simplified.column_title) output += ` › ${simplified.column_title}`;
         if (simplified.lane_title) output += ` (${simplified.lane_title})`;
         output += `\n`;
-        output += `👤 Owner: ${simplified.owner_name || 'Unassigned'}\n`;
+        // Numeric ids: without them a move needs a second, much heavier call.
+        output += `🆔 card_id: ${card.id} · board_id: ${card.board_id} · column_id: ${card.column_id} · lane_id: ${card.lane_id ?? 'n/a'} · state: ${projected.state_name}\n`;
+        output += `🎯 Responsible: ${projected.responsible ? `${projected.responsible.full_name} (id ${projected.responsible.id})` : 'none'}\n`;
+        output += `👤 Owner (who set the task): ${simplified.owner_name || 'Unassigned'}\n`;
+        if (projected.size_text) output += `⏱️ Estimate: ${projected.size_text}\n`;
         if (simplified.type_name) output += `🏷️ Type: ${simplified.type_name}\n`;
         if (simplified.size) output += `📊 Size: ${simplified.size}\n`;
         if (simplified.due_date) output += `📅 Due: ${simplified.due_date}\n`;
@@ -3017,22 +3440,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
         if (validatedArgs.column_id) params.column_id = validatedArgs.column_id;
         if (validatedArgs.lane_id) params.lane_id = validatedArgs.lane_id;
-        if (validatedArgs.description) params.description = validatedArgs.description;
+        if (validatedArgs.description !== undefined) params.description = validatedArgs.description;
         if (validatedArgs.type_id) params.type_id = validatedArgs.type_id;
-        if (validatedArgs.size !== undefined) params.size = validatedArgs.size;
+        if (validatedArgs.size_text !== undefined) params.size_text = validatedArgs.size_text;
         if (validatedArgs.asap !== undefined) params.asap = validatedArgs.asap;
         if (validatedArgs.owner_id) params.owner_id = validatedArgs.owner_id;
         if (validatedArgs.due_date) params.due_date = validatedArgs.due_date;
+        // Without this the client generates a fresh key every time and a retry
+        // creates a second card — which is what the parameter exists to prevent.
+        if (validatedArgs.idempotency_key) params.idempotency_key = validatedArgs.idempotency_key;
 
-        const card = await kaitenClient.createCard(params, signal);
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(card, null, 2),
-            },
-          ],
-        };
+        const warnings: string[] = [];
+        if (validatedArgs.size !== undefined) {
+          warnings.push('`size` is ignored by Kaiten on write — pass size_text ("8 ч") instead');
+        }
+
+        let card = await kaitenClient.createCard(params, signal);
+
+        if (validatedArgs.size_text !== undefined && (card as any).size_text !== validatedArgs.size_text) {
+          warnings.push(`size_text came back as ${JSON.stringify((card as any).size_text)}, expected ${JSON.stringify(validatedArgs.size_text)}`);
+        }
+
+        // Members are a separate endpoint: the card POST has no field for them.
+        if (validatedArgs.responsible_id) {
+          try {
+            const res = await setCardResponsible(kaitenClient, card.id, validatedArgs.responsible_id, signal);
+            warnings.push(...res.warnings);
+          } catch (error: any) {
+            warnings.push(`Could not set responsible ${validatedArgs.responsible_id}: ${describeError(error)}`);
+          }
+        }
+        // The responsible is already a member; adding them again as type 1
+        // would fight the role that was just set.
+        const plainMembers = (validatedArgs.member_ids || []).filter(
+          (id) => id !== validatedArgs.responsible_id
+        );
+        for (const memberId of plainMembers) {
+          try {
+            const res = await addCardParticipant(kaitenClient, card.id, memberId, signal);
+            warnings.push(...res.warnings);
+          } catch (error: any) {
+            warnings.push(`Could not add member ${memberId}: ${describeError(error)}`);
+          }
+        }
+        if (validatedArgs.responsible_id || plainMembers.length > 0) {
+          card = await kaitenClient.getCard(card.id, signal);
+        }
+
+        return jsonContent({
+          card: renderCard(card, validatedArgs.verbose, false),
+          ...(warnings.length ? { warnings } : {}),
+        });
       }
 
       case 'kaiten_update_card': {
@@ -3045,20 +3503,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (validatedArgs.column_id) params.column_id = validatedArgs.column_id;
         if (validatedArgs.lane_id) params.lane_id = validatedArgs.lane_id;
         if (validatedArgs.type_id) params.type_id = validatedArgs.type_id;
-        if (validatedArgs.size !== undefined) params.size = validatedArgs.size;
+        if (validatedArgs.size_text !== undefined) params.size_text = validatedArgs.size_text;
+        if (validatedArgs.sort_order !== undefined) params.sort_order = validatedArgs.sort_order;
         if (validatedArgs.asap !== undefined) params.asap = validatedArgs.asap;
         if (validatedArgs.owner_id) params.owner_id = validatedArgs.owner_id;
-        if (validatedArgs.due_date) params.due_date = validatedArgs.due_date;
+        // null is meaningful here: it clears the due date.
+        if (validatedArgs.due_date !== undefined) params.due_date = validatedArgs.due_date;
+        if (validatedArgs.idempotency_key) params.idempotency_key = validatedArgs.idempotency_key;
+
+        const warnings: string[] = [];
+        if (validatedArgs.size !== undefined) {
+          warnings.push('`size` is ignored by Kaiten on write — pass size_text ("8 ч") instead');
+        }
 
         const card = await kaitenClient.updateCard(validatedArgs.card_id, params, signal);
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(card, null, 2),
-            },
-          ],
-        };
+
+        // Kaiten answers 200 to writes it did not perform, so the values that
+        // are known to be lossy are read back off the response.
+        if (validatedArgs.size_text !== undefined && (card as any).size_text !== validatedArgs.size_text) {
+          warnings.push(`size_text came back as ${JSON.stringify((card as any).size_text)}, expected ${JSON.stringify(validatedArgs.size_text)}`);
+        }
+        if (validatedArgs.state !== undefined && card.state !== validatedArgs.state) {
+          warnings.push(
+            `state is ${card.state}, not ${validatedArgs.state} — Kaiten derives state from the column type; ` +
+            `move the card to a column of that type (kaiten_list_columns shows type 1=queue, 2=in progress, 3=done)`
+          );
+        }
+        if (validatedArgs.due_date === null && card.due_date) {
+          warnings.push(`due_date is still ${card.due_date}`);
+        }
+
+        return jsonContent({
+          card: renderCard(card, validatedArgs.verbose, false),
+          ...(warnings.length ? { warnings } : {}),
+        });
       }
 
       case 'kaiten_delete_card': {
@@ -3077,14 +3555,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'kaiten_add_card_child': {
         const validatedArgs = AddCardChildSchema.parse(args);
         const card = await kaitenClient.addCardChild(validatedArgs.card_id, validatedArgs.child_id, signal);
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(card, null, 2),
-            },
-          ],
-        };
+        return jsonContent({
+          parent_id: validatedArgs.card_id,
+          child: projectCard(card, cardCtx),
+        });
       }
 
       case 'kaiten_remove_card_child': {
@@ -3103,23 +3577,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'kaiten_list_card_children': {
         const validatedArgs = ListCardChildrenSchema.parse(args);
         const children = await kaitenClient.getCardChildren(validatedArgs.card_id, signal);
-        // Compact on purpose: the full card payload is dominated by base64 avatars.
-        const compact = children.map((c: any) => ({
-          id: c.id,
-          title: c.title,
-          state: c.state,
-          owner_id: c.owner_id,
-          board_id: c.board_id,
-          column_id: c.column_id,
-        }));
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(compact, null, 2),
-            },
-          ],
-        };
+        // Brief on purpose: a subtask list is for seeing what is left, and the
+        // full payload is dominated by base64 avatars.
+        return jsonContent(children.map((child) => projectCardBrief(child, cardCtx)));
       }
 
       case 'kaiten_get_card_comments': {
@@ -3141,17 +3601,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const comment = await kaitenClient.createComment(
           validatedArgs.card_id,
           validatedArgs.text,
-          undefined,
+          validatedArgs.idempotency_key,
           signal
         );
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(comment, null, 2),
-            },
-          ],
-        };
+        // The raw comment carries the author's base64 avatar.
+        return jsonContent(simplifyComment(comment));
       }
 
       case 'kaiten_update_comment': {
@@ -3160,17 +3614,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           validatedArgs.card_id,
           validatedArgs.comment_id,
           validatedArgs.text,
-          undefined,
+          validatedArgs.idempotency_key,
           signal
         );
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(comment, null, 2),
-            },
-          ],
-        };
+        return jsonContent(simplifyComment(comment));
       }
 
       case 'kaiten_delete_comment': {
@@ -3245,16 +3692,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (validatedArgs.limit) searchParams.limit = validatedArgs.limit;
         if (validatedArgs.skip) searchParams.skip = validatedArgs.skip;
 
-        const cards = await kaitenClient.searchCards(searchParams, signal);
+        // Paged: one request stops at 100 rows whatever `limit` says.
+        const wanted = validatedArgs.limit || 10;
+        const paged = await kaitenClient.searchCardsPaged(searchParams, wanted, signal);
+        const cards = paged.items;
 
-        // Apply verbosity control
         const verbosity = validatedArgs.verbosity || 'normal';
-        const processedCards = applyCardVerbosity(cards, verbosity, simplifyCardCompact);
 
         // Warn if returning many cards without space_id filter
-        const effectiveLimit = validatedArgs.limit || 10;
-        if (effectiveLimit > 20 && !searchParams.space_id) {
-          safeLog.warn(`[Kaiten MCP] Large search result (limit=${effectiveLimit}) without space_id filter may cause context overflow. Consider adding space_id or board_id.`);
+        if (wanted > 20 && !searchParams.space_id) {
+          safeLog.warn(`[Kaiten MCP] Large search result (limit=${wanted}) without space_id filter may cause context overflow. Consider adding space_id or board_id.`);
         }
 
         // Create human-readable summary
@@ -3262,37 +3709,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (validatedArgs.query) summary += ` matching "${validatedArgs.query}"`;
         if (searchParams.space_id) summary += ` in space ${searchParams.space_id}`;
         if (validatedArgs.board_id) summary += ` on board ${validatedArgs.board_id}`;
-        summary += `\nVerbosity: ${verbosity}\n\n`;
+        summary += `\n\n`;
 
-        // Format based on verbosity
         if (verbosity === 'minimal') {
-          // Minimal: just ID, title, board
-          processedCards.forEach((card, index) => {
-            summary += `${index + 1}. [${card.id}] ${card.title}\n`;
+          cards.forEach((card, index) => {
+            summary += `${index + 1}. [#${card.id}] ${card.title}\n`;
           });
         } else {
-          // Normal/detailed: include more details
-          processedCards.forEach((card, index) => {
-            summary += `${index + 1}. ${card.title}\n`;
-            summary += `   📋 Board: ${card.board_title || 'N/A'}\n`;
-            summary += `   👤 Owner: ${card.owner_name || 'Unassigned'}\n`;
-            if (card.asap) summary += `   ⚡ ASAP\n`;
-            if (card.blocked) summary += `   🚫 BLOCKED\n`;
-            summary += `   🔗 ${card.url}\n`;
-            summary += `   🕐 Updated: ${card.updated || 'N/A'}\n\n`;
+          projectCards(cards, cardCtx).forEach((card, index) => {
+            summary += renderCardLine(card, index);
           });
         }
 
-        summary += `\nℹ️ Use kaiten_get_card with card ID for full details.`;
-
-        // Apply truncation if response is too large
-        const finalResponse = truncateResponse(summary);
+        summary += paginationFooter({
+          returned: cards.length,
+          requested: wanted,
+          has_more: paged.has_more,
+          next_offset: paged.next_offset,
+        });
+        summary += `ℹ️ Use kaiten_get_card with card ID for full details.`;
 
         return {
           content: [
             {
               type: 'text' as const,
-              text: finalResponse,
+              text: truncateResponse(summary),
             },
           ],
         };
@@ -3301,48 +3742,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'kaiten_get_space_cards': {
         const validatedArgs = GetSpaceCardsSchema.parse(args);
         const condition = validatedArgs.condition !== undefined ? validatedArgs.condition : 1;
-        const cards = await kaitenClient.getCardsFromSpace(
-          validatedArgs.space_id,
-          validatedArgs.limit,
-          validatedArgs.skip,
-          condition,
+        const wanted = validatedArgs.limit || 10;
+        const paged = await kaitenClient.searchCardsPaged(
+          {
+            space_id: validatedArgs.space_id,
+            condition,
+            skip: validatedArgs.skip,
+            sort_by: 'created',
+            sort_direction: 'desc',
+          },
+          wanted,
           signal
         );
-
-        // Apply verbosity control
+        const cards = paged.items;
         const verbosity = validatedArgs.verbosity || 'normal';
-        const processedCards = applyCardVerbosity(cards, verbosity, simplifyCardCompact);
 
-        // Human-readable format (similar to search)
-        let output = `Found ${cards.length} card(s) in space ${validatedArgs.space_id}\n`;
-        output += `Verbosity: ${verbosity}\n\n`;
-
-        // Format based on verbosity
+        let output = `Found ${cards.length} card(s) in space ${validatedArgs.space_id}\n\n`;
         if (verbosity === 'minimal') {
-          processedCards.forEach((card, index) => {
-            output += `${index + 1}. [${card.id}] ${card.title}\n`;
+          cards.forEach((card, index) => {
+            output += `${index + 1}. [#${card.id}] ${card.title}\n`;
           });
         } else {
-          processedCards.forEach((card, index) => {
-            output += `${index + 1}. ${card.title}\n`;
-            output += `   📋 Board: ${card.board_title || 'N/A'}\n`;
-            output += `   👤 Owner: ${card.owner_name || 'Unassigned'}\n`;
-            if (card.asap) output += `   ⚡ ASAP\n`;
-            if (card.blocked) output += `   🚫 BLOCKED\n`;
-            output += `   🔗 ${card.url}\n`;
-            output += `   🕐 Updated: ${card.updated || 'N/A'}\n\n`;
+          projectCards(cards, cardCtx).forEach((card, index) => {
+            output += renderCardLine(card, index);
           });
         }
-        output += `\nℹ️ Use kaiten_get_card for full details.`;
-
-        // Apply truncation
-        const finalOutput = truncateResponse(output);
+        output += paginationFooter({
+          returned: cards.length,
+          requested: wanted,
+          has_more: paged.has_more,
+          next_offset: paged.next_offset,
+        });
+        output += `ℹ️ Use kaiten_get_card for full details.`;
 
         return {
           content: [
             {
               type: 'text' as const,
-              text: finalOutput,
+              text: truncateResponse(output),
             },
           ],
         };
@@ -3351,48 +3788,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'kaiten_get_board_cards': {
         const validatedArgs = GetBoardCardsSchema.parse(args);
         const condition = validatedArgs.condition !== undefined ? validatedArgs.condition : 1;
-        const cards = await kaitenClient.getCardsFromBoard(
-          validatedArgs.board_id,
-          validatedArgs.limit,
-          validatedArgs.skip,
-          condition,
+        const wanted = validatedArgs.limit || 10;
+        // Goes through /cards?board_id=... — /boards/{id}/cards answers 404.
+        const paged = await kaitenClient.searchCardsPaged(
+          {
+            board_id: validatedArgs.board_id,
+            condition,
+            skip: validatedArgs.skip,
+            sort_by: 'created',
+            sort_direction: 'desc',
+          },
+          wanted,
           signal
         );
-
-        // Apply verbosity control
+        const cards = paged.items;
         const verbosity = validatedArgs.verbosity || 'normal';
-        const processedCards = applyCardVerbosity(cards, verbosity, simplifyCardCompact);
 
-        // Human-readable format (similar to search)
-        let output = `Found ${cards.length} card(s) on board ${validatedArgs.board_id}\n`;
-        output += `Verbosity: ${verbosity}\n\n`;
-
-        // Format based on verbosity
+        let output = `Found ${cards.length} card(s) on board ${validatedArgs.board_id}\n\n`;
         if (verbosity === 'minimal') {
-          processedCards.forEach((card, index) => {
-            output += `${index + 1}. [${card.id}] ${card.title}\n`;
+          cards.forEach((card, index) => {
+            output += `${index + 1}. [#${card.id}] ${card.title}\n`;
           });
         } else {
-          processedCards.forEach((card, index) => {
-            output += `${index + 1}. ${card.title}\n`;
-            output += `   📋 Board: ${card.board_title || 'N/A'}\n`;
-            output += `   👤 Owner: ${card.owner_name || 'Unassigned'}\n`;
-            if (card.asap) output += `   ⚡ ASAP\n`;
-            if (card.blocked) output += `   🚫 BLOCKED\n`;
-            output += `   🔗 ${card.url}\n`;
-            output += `   🕐 Updated: ${card.updated || 'N/A'}\n\n`;
+          projectCards(cards, cardCtx).forEach((card, index) => {
+            output += renderCardLine(card, index);
           });
         }
-        output += `\nℹ️ Use kaiten_get_card for full details.`;
-
-        // Apply truncation
-        const finalOutput = truncateResponse(output);
+        output += paginationFooter({
+          returned: cards.length,
+          requested: wanted,
+          has_more: paged.has_more,
+          next_offset: paged.next_offset,
+        });
+        output += `ℹ️ Use kaiten_get_card for full details.`;
 
         return {
           content: [
             {
               type: 'text' as const,
-              text: finalOutput,
+              text: truncateResponse(output),
             },
           ],
         };
@@ -3498,9 +3932,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           cache.setBoard(validatedArgs.board_id, board);
         }
 
-        // Apply format parameter
+        // GET /boards/{id} embeds every card of the board — 2.7 MB on a board
+        // of 43 cards. Only the structure is ever wanted here; the cards have
+        // kaiten_get_board_cards.
+        const projected = projectBoard(board);
         const format = validatedArgs.format || 'markdown';
-        const response = applyResponseFormat(board, format, `Board: ${board.title}`);
+        const response = applyResponseFormat(projected, format, `Board: ${board.title}`);
 
         return {
           content: [
@@ -3556,68 +3993,422 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'kaiten_get_current_user': {
         const user = await kaitenClient.getCurrentUser(signal);
+        // The raw object is 14 KB: base64 avatar, permission matrices, every
+        // notification setting. An agent needs the identity.
+        return jsonContent({
+          ...projectKaitenUser(user),
+          default_space_id: (user as any).default_space_id ?? null,
+          role: (user as any).role ?? null,
+        });
+      }
+
+      case 'kaiten_list_users': {
+        const validatedArgs = ListUsersSchema.parse(args);
+        const wanted = validatedArgs.limit || 100;
+
+        if (!validatedArgs.query) {
+          safeLog.warn('[Kaiten MCP] WARNING: kaiten_list_users called without a query. Consider using query for better performance.');
+        }
+
+        const verbosity = validatedArgs.verbosity || 'normal';
+        // The unfiltered list is the one worth caching, and it is the one
+        // kaiten_cache_invalidate_users clears.
+        const cacheable = !validatedArgs.query && !validatedArgs.offset;
+        const cached = cacheable ? cache.getUsers() : null;
+
+        if (cached) {
+          const slice = cached.slice(0, wanted);
+          return jsonContent({
+            users: stripAvatars(applyUserVerbosity(slice, verbosity)),
+            returned: slice.length,
+            requested: wanted,
+            has_more: cached.length > wanted,
+            next_offset: cached.length > wanted ? slice.length : null,
+            from_cache: true,
+          });
+        }
+
+        // /users caps a single response at 100 rows as silently as /cards does.
+        const paged = await kaitenClient.getUsersPaged(
+          { query: validatedArgs.query, limit: wanted, offset: validatedArgs.offset },
+          signal
+        );
+        if (cacheable && !paged.has_more) {
+          cache.setUsers(paged.items);
+        }
+
+        return jsonContent({
+          users: stripAvatars(applyUserVerbosity(paged.items, verbosity)),
+          returned: paged.items.length,
+          requested: wanted,
+          has_more: paged.has_more,
+          next_offset: paged.next_offset,
+        });
+      }
+
+      // ============================================
+      // MEMBERS / RESPONSIBLE
+      // ============================================
+
+      case 'kaiten_list_card_members': {
+        const validatedArgs = ListCardMembersSchema.parse(args);
+        const result = await listCardMembers(kaitenClient, validatedArgs.card_id, signal);
+        return jsonContent(result);
+      }
+
+      case 'kaiten_set_card_responsible': {
+        const validatedArgs = SetCardResponsibleSchema.parse(args);
+        const result = await setCardResponsible(
+          kaitenClient,
+          validatedArgs.card_id,
+          validatedArgs.user_id,
+          signal
+        );
+        return jsonContent(result);
+      }
+
+      case 'kaiten_remove_card_responsible': {
+        const validatedArgs = RemoveCardResponsibleSchema.parse(args);
+        const before = await listCardMembers(kaitenClient, validatedArgs.card_id, signal);
+        if (!before.responsible) {
+          return jsonContent({
+            card_id: validatedArgs.card_id,
+            removed: null,
+            members: before.members,
+            message: 'Card has no responsible member',
+          });
+        }
+        const result = await removeCardMemberOp(
+          kaitenClient,
+          validatedArgs.card_id,
+          before.responsible.id,
+          signal
+        );
+        return jsonContent({
+          card_id: validatedArgs.card_id,
+          removed: before.responsible,
+          members: result.members,
+          responsible: result.responsible,
+          ...(result.warnings.length ? { warnings: result.warnings } : {}),
+        });
+      }
+
+      case 'kaiten_add_card_member': {
+        const validatedArgs = AddCardMemberSchema.parse(args);
+        const result = await addCardParticipant(
+          kaitenClient,
+          validatedArgs.card_id,
+          validatedArgs.user_id,
+          signal
+        );
+        return jsonContent(result);
+      }
+
+      case 'kaiten_remove_card_member': {
+        const validatedArgs = RemoveCardMemberSchema.parse(args);
+        const result = await removeCardMemberOp(
+          kaitenClient,
+          validatedArgs.card_id,
+          validatedArgs.user_id,
+          signal
+        );
+        return jsonContent(result);
+      }
+
+      // ============================================
+      // BLOCKERS
+      // ============================================
+
+      case 'kaiten_list_card_blockers': {
+        const validatedArgs = ListCardBlockersSchema.parse(args);
+        const blockers = await kaitenClient.getCardBlockers(validatedArgs.card_id, signal);
+        const visible = validatedArgs.include_released
+          ? blockers
+          : blockers.filter((b) => !b.released);
+        return jsonContent({
+          card_id: validatedArgs.card_id,
+          active: blockers.filter((b) => !b.released).length,
+          blockers: visible.map(projectBlocker),
+        });
+      }
+
+      case 'kaiten_block_card': {
+        const validatedArgs = BlockCardSchema.parse(args);
+        const body = validatedArgs.reason !== undefined
+          ? { reason: validatedArgs.reason }
+          : { blocker_card_id: validatedArgs.blocker_card_id };
+        const record = await kaitenClient.addCardBlocker(validatedArgs.card_id, body, signal);
+        return jsonContent({
+          card_id: validatedArgs.card_id,
+          blocker: projectBlocker(record),
+          hint: 'Release it with kaiten_unblock_card({card_id, blocker_id: <blocker.id>})',
+        });
+      }
+
+      case 'kaiten_unblock_card': {
+        const validatedArgs = UnblockCardSchema.parse(args);
+        const targets: number[] = [];
+        if (validatedArgs.blocker_id !== undefined) {
+          targets.push(validatedArgs.blocker_id);
+        } else {
+          const blockers = await kaitenClient.getCardBlockers(validatedArgs.card_id, signal);
+          targets.push(...blockers.filter((b) => !b.released).map((b) => b.id));
+        }
+
+        const released = [];
+        const failed = [];
+        for (const blockerId of targets) {
+          try {
+            const record = await kaitenClient.removeCardBlocker(validatedArgs.card_id, blockerId, signal);
+            released.push(projectBlocker(record));
+          } catch (error: any) {
+            failed.push({ blocker_id: blockerId, error: describeError(error) });
+          }
+        }
+
+        return jsonContent({
+          card_id: validatedArgs.card_id,
+          released,
+          ...(failed.length ? { failed } : {}),
+          ...(targets.length === 0 ? { message: 'Card has no active blockers' } : {}),
+        });
+      }
+
+      // ============================================
+      // ORDER
+      // ============================================
+
+      case 'kaiten_set_card_order': {
+        const validatedArgs = SetCardOrderSchema.parse(args);
+        const card = await kaitenClient.getCard(validatedArgs.card_id, signal);
+
+        let plan: { sort_order: number; warnings: string[] };
+        if (validatedArgs.sort_order !== undefined) {
+          plan = { sort_order: validatedArgs.sort_order, warnings: [] };
+        } else {
+          const column = await kaitenClient.searchCardsPaged(
+            {
+              board_id: card.board_id,
+              column_id: card.column_id,
+              ...(card.lane_id ? { lane_id: card.lane_id } : {}),
+              condition: 1,
+            },
+            300,
+            signal
+          );
+          plan = planSortOrder(validatedArgs.card_id, column.items as any, {
+            before_card_id: validatedArgs.before_card_id,
+            after_card_id: validatedArgs.after_card_id,
+            position: validatedArgs.position,
+          });
+          if (column.has_more) {
+            plan.warnings.push('Column has more than 300 cards; the neighbourhood was computed from the first 300');
+          }
+        }
+
+        const updated = await kaitenClient.updateCard(
+          validatedArgs.card_id,
+          { sort_order: plan.sort_order },
+          signal
+        );
+        const warnings = [...plan.warnings];
+        if ((updated as any).sort_order !== plan.sort_order) {
+          warnings.push(`sort_order came back as ${(updated as any).sort_order}, expected ${plan.sort_order}`);
+        }
+
+        return jsonContent({
+          card: projectCard(updated, cardCtx),
+          sort_order: (updated as any).sort_order,
+          ...(warnings.length ? { warnings } : {}),
+        });
+      }
+
+      case 'kaiten_reorder_cards': {
+        const validatedArgs = ReorderCardsSchema.parse(args);
+        const warnings: string[] = [];
+        const current = new Map<number, number | null | undefined>();
+
+        if (validatedArgs.start_at === undefined) {
+          // Reuse the slots the cards already occupy: read the column of the
+          // first card once instead of fetching every card separately.
+          const head = await kaitenClient.getCard(validatedArgs.card_ids[0], signal);
+          const column = await kaitenClient.searchCardsPaged(
+            {
+              board_id: head.board_id,
+              column_id: head.column_id,
+              ...(head.lane_id ? { lane_id: head.lane_id } : {}),
+              condition: 1,
+            },
+            300,
+            signal
+          );
+          for (const c of column.items) current.set(c.id, (c as any).sort_order);
+          const missing = validatedArgs.card_ids.filter((id) => typeof current.get(id) !== 'number');
+          if (missing.length) {
+            warnings.push(
+              `Cards ${missing.join(', ')} have no known position in the column of ${validatedArgs.card_ids[0]}; ` +
+              `the whole list was renumbered sequentially (step 1) instead of reusing existing positions, ` +
+              `so cards that were not listed may end up between them — pass start_at/step to control that`
+            );
+          }
+        }
+
+        const plan = planReorder(validatedArgs.card_ids, current, {
+          start_at: validatedArgs.start_at,
+          step: validatedArgs.step,
+        });
+
+        const results = await Promise.all(
+          plan.map(async (item) => {
+            try {
+              const card = await kaitenClient.updateCard(item.card_id, { sort_order: item.sort_order }, signal);
+              const stored = (card as any).sort_order;
+              return {
+                card_id: item.card_id,
+                // Compared with a tolerance: a float that came back rounded is
+                // still the move landing.
+                ok: typeof stored === 'number' && Math.abs(stored - item.sort_order) < 1e-9,
+                sort_order: stored,
+              };
+            } catch (error: any) {
+              return { card_id: item.card_id, ok: false, error: describeError(error) };
+            }
+          })
+        );
+
+        return jsonContent({
+          updated: results.filter((r) => r.ok).length,
+          failed: results.filter((r) => !r.ok).length,
+          results,
+          ...(warnings.length ? { warnings } : {}),
+        });
+      }
+
+      // ============================================
+      // BULK
+      // ============================================
+
+      case 'kaiten_bulk_move_cards': {
+        const validatedArgs = BulkMoveCardsSchema.parse(args);
+        const patch: UpdateCardParams = {};
+        if (validatedArgs.board_id) patch.board_id = validatedArgs.board_id;
+        if (validatedArgs.column_id) patch.column_id = validatedArgs.column_id;
+        if (validatedArgs.lane_id) patch.lane_id = validatedArgs.lane_id;
+        if (validatedArgs.state !== undefined) patch.state = validatedArgs.state;
+
+        const result = await bulkUpdateCards(kaitenClient, validatedArgs.card_ids, patch, signal);
+        return jsonContent(renderBulk(result));
+      }
+
+      case 'kaiten_bulk_set_due_date': {
+        const validatedArgs = BulkSetDueDateSchema.parse(args);
+        const result = await bulkUpdateCards(
+          kaitenClient,
+          validatedArgs.card_ids,
+          { due_date: validatedArgs.due_date },
+          signal
+        );
+        const rendered = renderBulk(result);
+        for (const item of result.results) {
+          if (item.ok && item.card && validatedArgs.due_date === null && item.card.due_date) {
+            rendered.warnings.push(`Card ${item.card_id}: due_date is still ${item.card.due_date}`);
+          }
+        }
+        return jsonContent(rendered);
+      }
+
+      case 'kaiten_bulk_set_responsible': {
+        const validatedArgs = BulkSetResponsibleSchema.parse(args);
+        const result = await bulkSetResponsible(
+          kaitenClient,
+          validatedArgs.card_ids,
+          validatedArgs.user_id,
+          signal
+        );
+        return jsonContent(result);
+      }
+
+      // ============================================
+      // CARDS BY PERSON
+      // ============================================
+
+      case 'kaiten_find_cards_by_user': {
+        const validatedArgs = FindCardsByUserSchema.parse(args);
+        const filters: SearchCardsParams = { condition: validatedArgs.condition ?? 1 };
+        if (validatedArgs.board_id) filters.board_id = validatedArgs.board_id;
+        if (validatedArgs.state !== undefined) filters.state = validatedArgs.state;
+        if (validatedArgs.skip !== undefined) filters.skip = validatedArgs.skip;
+        if (validatedArgs.space_id !== undefined && validatedArgs.space_id !== 0) {
+          filters.space_id = validatedArgs.space_id;
+        } else if (validatedArgs.space_id === undefined && !validatedArgs.board_id && DEFAULT_SPACE_ID) {
+          filters.space_id = DEFAULT_SPACE_ID;
+        }
+
+        const limit = validatedArgs.limit || 50;
+        const found = await findCardsByUser(
+          kaitenClient,
+          {
+            ...filters,
+            user_id: validatedArgs.user_id,
+            role: validatedArgs.role,
+            limit,
+            max_scan: validatedArgs.max_scan,
+          },
+          signal
+        );
+
+        if (validatedArgs.verbose) {
+          return jsonContent({
+            cards: stripAvatars(found.cards),
+            matched: found.cards.length,
+            scanned: found.scanned,
+            has_more: found.has_more,
+            next_offset: found.next_offset,
+          });
+        }
+
+        let output = `${found.cards.length} card(s) where user ${validatedArgs.user_id} is ${validatedArgs.role}`;
+        if (filters.board_id) output += ` on board ${filters.board_id}`;
+        if (filters.space_id) output += ` in space ${filters.space_id}`;
+        output += `\n\n`;
+        projectCards(found.cards, cardCtx).forEach((card, index) => {
+          output += renderCardLine(card, index);
+        });
+        output += paginationFooter({
+          returned: found.cards.length,
+          requested: limit,
+          has_more: found.has_more,
+          next_offset: found.next_offset,
+          scanned: found.scanned,
+        });
+
         return {
           content: [
             {
               type: 'text' as const,
-              text: JSON.stringify(user, null, 2),
+              text: truncateResponse(output),
             },
           ],
         };
       }
 
-      case 'kaiten_list_users': {
-        const validatedArgs = ListUsersSchema.parse(args);
-
-        // Use server-side filtering when parameters provided
-        // /users endpoint supports query, limit, and offset for server-side filtering
-        if (validatedArgs.query || validatedArgs.limit || validatedArgs.offset) {
-          const users = await kaitenClient.getUsers({
-            query: validatedArgs.query,
-            limit: validatedArgs.limit,
-            offset: validatedArgs.offset,
-          }, signal);
-
-          // Apply verbosity control
-          const verbosity = validatedArgs.verbosity || 'normal';
-          const processedUsers = applyUserVerbosity(users, verbosity);
-
-          const output = truncateResponse(JSON.stringify(processedUsers, null, 2));
-
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: output,
-              },
-            ],
-          };
-        }
-
-        // Fallback: cache full list when no parameters
-        // Note: Starting mid-July, /users endpoint returns max 100 users per request
-        safeLog.warn('[Kaiten MCP] WARNING: kaiten_list_users called without parameters. Consider using query parameter for better performance.');
-
-        let allUsers = cache.getUsers();
-        if (!allUsers) {
-          allUsers = await kaitenClient.getUsers(undefined, signal);
-          cache.setUsers(allUsers);
-        }
-
-        // Apply verbosity control
-        const verbosity = validatedArgs.verbosity || 'normal';
-        const processedUsers = applyUserVerbosity(allUsers, verbosity);
-
-        const output = truncateResponse(JSON.stringify(processedUsers, null, 2));
-
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: output,
-            },
-          ],
-        };
+      case 'kaiten_update_board': {
+        const validatedArgs = UpdateBoardSchema.parse(args);
+        const params: { title?: string; description?: string } = {};
+        if (validatedArgs.title !== undefined) params.title = validatedArgs.title;
+        if (validatedArgs.description !== undefined) params.description = validatedArgs.description;
+        const board = await kaitenClient.updateBoard(
+          validatedArgs.space_id,
+          validatedArgs.board_id,
+          params,
+          signal
+        );
+        cache.invalidateBoards();
+        return jsonContent({
+          id: board.id,
+          title: board.title,
+          space_id: (board as any).space_id ?? validatedArgs.space_id,
+        });
       }
 
       case 'kaiten_cache_invalidate_spaces': {
@@ -3751,6 +4542,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 message: 'Invalid request parameters',
                 details: formattedErrors
               }
+            }, null, 2),
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Kaiten's own message is the useful part ("It is currently not allowed to
+    // change a due date of completed cards"), and it only lives in `details`.
+    if (error instanceof KaitenError) {
+      const apiMessage =
+        typeof error.details === 'object' && error.details !== null
+          ? (error.details as any).message
+          : undefined;
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              error: {
+                type: error.type,
+                message: apiMessage ? `${error.message}: ${apiMessage}` : error.message,
+                status: error.status,
+                details: error.details,
+                hint: error.hint,
+              },
             }, null, 2),
           },
         ],
