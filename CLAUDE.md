@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server for Kaiten API integration. It provides 26 tools for managing Kaiten cards, comments, spaces, and boards directly from Claude Desktop. The server is production-ready with comprehensive logging, caching, retry logic, and concurrency control.
+This is an MCP (Model Context Protocol) server for Kaiten API integration. It provides 47 tools for managing Kaiten cards, members, blockers, card order, comments, spaces, and boards directly from Claude Desktop. The server is production-ready with comprehensive logging, caching, retry logic, and concurrency control.
 
 **Current Version:** 2.3.0
 
@@ -48,7 +48,7 @@ Reference: src/config.ts:126-152 implements the `safeLog` wrapper.
 
 1. **src/index.ts** (main MCP server)
    - Implements MCP Server with stdio transport
-   - Defines 26 tool handlers (cards, comments, spaces, boards, cache, logging)
+   - Defines 47 tool handlers (cards, members/responsible, blockers, order, bulk, comments, spaces, boards, cache, logging)
    - Implements MCP Resources (kaiten-card:///, kaiten-space:///, etc.)
    - Implements Server Prompts with usage instructions
    - Uses Zod schemas for all tool parameter validation
@@ -113,6 +113,19 @@ Reference: src/config.ts:126-152 implements the `safeLog` wrapper.
 - `KaitenError` class with categorized types: AUTH_ERROR, RATE_LIMITED, NOT_FOUND, TIMEOUT, VALIDATION_ERROR, API_ERROR, NETWORK_ERROR
 - Each error includes `hint` field with actionable guidance
 - All errors are JSON-serializable via `toJSON()`
+
+**Card Projection Pattern (src/card-view.ts):**
+- Every tool that returns a card returns `projectCard()`, not the raw object: a raw card is
+  7-77 KB, dominated by base64 avatars, nested child cards and `path_data`.
+- `verbose: true` returns the full object through `stripAvatars()` — avatars never ship.
+- Bulk answers use `projectCardBrief()` (one line per card).
+
+**Card Operations Pattern (src/card-ops.ts):**
+- The assignee is a card MEMBER with `type: 2`; `owner` is who set the task.
+- `setCardResponsible()` does POST → read back → PATCH, because the API does not honour the
+  requested `type` reliably, and reports the demoted predecessor.
+- Pagination helpers live in the client (`searchCardsPaged`, `getUsersPaged`): the API caps
+  every list at 100 rows silently, so both read one row more than asked and report has_more.
 
 **Helper Functions Pattern:**
 - `simplifyUser()`, `simplifySpace()`, `simplifyCard()`, `simplifyComment()` in src/index.ts
@@ -224,7 +237,7 @@ MCP Inspector provides:
 ## Key Files Reference
 
 - **CHANGELOG.md** - Complete version history with detailed changes
-- **TOOLS.md** - Full reference for all 26 tools
+- **TOOLS.md** - Full reference for the tool set (outdated: written for 26 tools)
 - **DEFAULT_SPACE_GUIDE.md** - Default space behavior documentation
 - **LOGGING_IMPLEMENTATION_PLAN.md** - v2.3.0 logging architecture
 - **.env.example** - All ENV variables with profiles
