@@ -185,10 +185,14 @@ export interface CreateCardParams {
   lane_id?: number;
   description?: string;
   type_id?: number;
+  /** Ignored by Kaiten on write — use size_text. Kept for compatibility. */
   size?: number;
+  /** The only estimate field Kaiten stores, e.g. "8 ч". */
+  size_text?: string;
   asap?: boolean;
   owner_id?: number;
-  due_date?: string;
+  due_date?: string | null;
+  sort_order?: number;
   custom_fields?: Record<string, any>;
   idempotency_key?: string;
 }
@@ -201,17 +205,116 @@ export interface UpdateCardParams {
   column_id?: number;
   lane_id?: number;
   type_id?: number;
+  /** Ignored by Kaiten on write — use size_text. Kept for compatibility. */
   size?: number;
+  /** The only estimate field Kaiten stores, e.g. "8 ч". */
+  size_text?: string;
   asap?: boolean;
   owner_id?: number;
-  due_date?: string;
+  /** null clears the due date; the API accepts it. */
+  due_date?: string | null;
+  sort_order?: number;
   custom_fields?: Record<string, any>;
   idempotency_key?: string;
+}
+
+export interface KaitenCardMember extends KaitenUser {
+  card_id?: number;
+  user_id?: number;
+  /** 2 = responsible (at most one per card), 1 = ordinary participant. */
+  type?: number;
+}
+
+export interface KaitenBlockerRecord {
+  /** The blocker record id — this, not a card id, is what DELETE takes. */
+  id: number;
+  card_id: number;
+  reason?: string | null;
+  blocker_card_id?: number | null;
+  blocker_card_title?: string | null;
+  blocker_id?: number | null;
+  released: boolean;
+  created?: string;
+  updated?: string;
+  blocker?: KaitenUser;
+}
+
+/**
+ * Kaiten silently caps every list endpoint at 100 records: `limit=300` answers
+ * 200 OK with 100 rows and no marker that anything was left behind. Every list
+ * call here pages in chunks of this size instead of trusting a single request.
+ */
+export const KAITEN_PAGE_SIZE = 100;
+
+export interface PagedResult<T> {
+  items: T[];
+  /** True when the API still had rows left when we stopped. */
+  has_more: boolean;
+  /** Offset to continue from, or null when the list was exhausted. */
+  next_offset: number | null;
+  /** Number of API requests spent. */
+  requests: number;
 }
 
 // ============================================
 // KAITEN CLIENT WITH RETRY/BACKOFF/CONCURRENCY
 // ============================================
+
+export interface SearchCardsParams {
+  // Text search
+  query?: string;
+  title?: string;
+
+  // Basic filters
+  space_id?: number;
+  board_id?: number;
+  column_id?: number;
+  lane_id?: number;
+  state?: number;
+  owner_id?: number;
+  type_id?: number;
+  condition?: number;
+
+  // Date filters
+  created_before?: string;
+  created_after?: string;
+  updated_before?: string;
+  updated_after?: string;
+  due_date_before?: string;
+  due_date_after?: string;
+  last_moved_to_done_at_before?: string;
+  last_moved_to_done_at_after?: string;
+
+  // Boolean flags
+  asap?: boolean;
+  archived?: boolean;
+  overdue?: boolean;
+  done_on_time?: boolean;
+  with_due_date?: boolean;
+
+  // Multiple IDs (comma-separated)
+  owner_ids?: string;
+  member_ids?: string;
+  column_ids?: string;
+  type_ids?: string;
+  tag_ids?: string;
+
+  // Exclude filters
+  exclude_board_ids?: string;
+  exclude_owner_ids?: string;
+  exclude_card_ids?: string;
+
+  // Sorting and pagination
+  sort_by?: string;
+  sort_direction?: string;
+  limit?: number;
+  skip?: number;
+}
+
+export interface KaitenClientOptions {
+  /** Axios adapter override. Only used by tests to answer without a network. */
+  adapter?: any;
+}
 
 export class KaitenClient {
   private client: AxiosInstance;
@@ -222,7 +325,7 @@ export class KaitenClient {
     return `mcp-${Date.now()}-${randomBytes(8).toString('hex')}`;
   }
 
-  constructor(apiUrl: string, apiToken: string) {
+  constructor(apiUrl: string, apiToken: string, options: KaitenClientOptions = {}) {
     // Create axios instance with timeout
     this.client = axios.create({
       baseURL: apiUrl,
@@ -232,6 +335,8 @@ export class KaitenClient {
         'User-Agent': 'kaiten-mcp/2.5.0-kaiten-images.1',
       },
       timeout: config.KAITEN_REQUEST_TIMEOUT_MS,
+      // Tests inject a fake adapter here; production leaves it undefined.
+      ...(options.adapter ? { adapter: options.adapter } : {}),
     });
 
     // Configure axios-retry with exponential backoff
@@ -548,7 +653,9 @@ export class KaitenClient {
   }
 
 
-  // Get cards from a board
+  // Get cards from a board.
+  // NOTE: /boards/{id}/cards answers 404 on this Kaiten (checked live on
+  // 2026-09-21 against three boards) — the board filter lives on /cards.
   async getCardsFromBoard(
     boardId: number,
     limit: number = 10,
@@ -556,13 +663,10 @@ export class KaitenClient {
     condition: number = 1,
     signal?: AbortSignal
   ): Promise<KaitenCard[]> {
-    return this.queuedRequest(async () => {
-      const response = await this.client.get(
-        `/boards/${boardId}/cards?limit=${limit}&skip=${skip}&sort_by=created&sort_direction=desc&condition=${condition}`,
-        { signal }
-      );
-      return response.data;
-    }, signal);
+    return this.searchCards(
+      { board_id: boardId, limit, skip, condition, sort_by: 'created', sort_direction: 'desc' },
+      signal
+    );
   }
 
   // Get cards from a space
@@ -582,57 +686,133 @@ export class KaitenClient {
     }, signal);
   }
 
+  /**
+   * Pages a card list to the end instead of trusting one `limit`.
+   *
+   * Kaiten caps any list response at KAITEN_PAGE_SIZE and says nothing about
+   * it, so a board of 312 cards read with `limit=300` looks like a board of
+   * 100. `wanted` is how many cards the caller asked for; the loop stops as
+   * soon as it has them and reports honestly whether more were left.
+   */
+  async searchCardsPaged(
+    params: SearchCardsParams,
+    wanted: number,
+    signal?: AbortSignal,
+    maxRequests: number = 50
+  ): Promise<PagedResult<KaitenCard>> {
+    const startOffset = params.skip || 0;
+    const items: KaitenCard[] = [];
+    let requests = 0;
+    let offset = startOffset;
+    let exhausted = false;
+
+    // Reads one row more than asked for: that extra row is what makes has_more
+    // a fact instead of a guess. A short page means the list ended.
+    while (items.length <= wanted && requests < maxRequests) {
+      const pageSize = Math.min(KAITEN_PAGE_SIZE, wanted - items.length + 1);
+      const page = await this.searchCards({ ...params, limit: pageSize, skip: offset }, signal);
+      requests++;
+      items.push(...page);
+      if (page.length < pageSize) {
+        exhausted = true;
+        break;
+      }
+      offset += page.length;
+    }
+
+    // Stopping because of the request cap is not the same as reaching the end:
+    // saying has_more: false there would be the silent truncation this whole
+    // function exists to avoid.
+    const trimmed = items.slice(0, wanted);
+    const has_more = !exhausted && (items.length > wanted || requests >= maxRequests);
+    return {
+      items: trimmed,
+      has_more,
+      next_offset: has_more ? startOffset + trimmed.length : null,
+      requests,
+    };
+  }
+
+  // Card members. `type: 2` is the responsible person, `type: 1` an ordinary
+  // participant; Kaiten keeps at most one type-2 member per card.
+  async getCardMembers(cardId: number, signal?: AbortSignal): Promise<KaitenCardMember[]> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.get(`/cards/${cardId}/members`, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async addCardMember(
+    cardId: number,
+    userId: number,
+    type: number,
+    signal?: AbortSignal
+  ): Promise<KaitenCardMember> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.post(
+        `/cards/${cardId}/members`,
+        { user_id: userId, type },
+        { signal }
+      );
+      return response.data;
+    }, signal);
+  }
+
+  async updateCardMember(
+    cardId: number,
+    userId: number,
+    type: number,
+    signal?: AbortSignal
+  ): Promise<KaitenCardMember> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.patch(
+        `/cards/${cardId}/members/${userId}`,
+        { type },
+        { signal }
+      );
+      return response.data;
+    }, signal);
+  }
+
+  async removeCardMember(cardId: number, userId: number, signal?: AbortSignal): Promise<void> {
+    return this.queuedRequest(async () => {
+      await this.client.delete(`/cards/${cardId}/members/${userId}`, { signal });
+    }, signal);
+  }
+
+  // Blockers. A card blocker is a record with its own id: releasing one takes
+  // that record id, not the id of the blocking card.
+  async getCardBlockers(cardId: number, signal?: AbortSignal): Promise<KaitenBlockerRecord[]> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.get(`/cards/${cardId}/blockers`, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async addCardBlocker(
+    cardId: number,
+    body: { reason?: string; blocker_card_id?: number },
+    signal?: AbortSignal
+  ): Promise<KaitenBlockerRecord> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.post(`/cards/${cardId}/blockers`, body, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async removeCardBlocker(
+    cardId: number,
+    blockerRecordId: number,
+    signal?: AbortSignal
+  ): Promise<KaitenBlockerRecord> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.delete(`/cards/${cardId}/blockers/${blockerRecordId}`, { signal });
+      return response.data;
+    }, signal);
+  }
+
   // Search cards (using filters)
-  async searchCards(params: {
-    // Text search
-    query?: string;
-    title?: string;
-
-    // Basic filters
-    space_id?: number;
-    board_id?: number;
-    column_id?: number;
-    lane_id?: number;
-    state?: number;
-    owner_id?: number;
-    type_id?: number;
-    condition?: number;
-
-    // Date filters
-    created_before?: string;
-    created_after?: string;
-    updated_before?: string;
-    updated_after?: string;
-    due_date_before?: string;
-    due_date_after?: string;
-    last_moved_to_done_at_before?: string;
-    last_moved_to_done_at_after?: string;
-
-    // Boolean flags
-    asap?: boolean;
-    archived?: boolean;
-    overdue?: boolean;
-    done_on_time?: boolean;
-    with_due_date?: boolean;
-
-    // Multiple IDs (comma-separated)
-    owner_ids?: string;
-    member_ids?: string;
-    column_ids?: string;
-    type_ids?: string;
-    tag_ids?: string;
-
-    // Exclude filters
-    exclude_board_ids?: string;
-    exclude_owner_ids?: string;
-    exclude_card_ids?: string;
-
-    // Sorting and pagination
-    sort_by?: string;
-    sort_direction?: string;
-    limit?: number;
-    skip?: number;
-  }, signal?: AbortSignal): Promise<KaitenCard[]> {
+  async searchCards(params: SearchCardsParams, signal?: AbortSignal): Promise<KaitenCard[]> {
     return this.queuedRequest(async () => {
       const queryParams = new URLSearchParams();
 
@@ -754,6 +934,23 @@ export class KaitenClient {
     }, signal);
   }
 
+  /**
+   * Boards are read at /boards/{id} but written at /spaces/{spaceId}/boards/{id}
+   * — a PATCH to the short path answers 404. (Columns are the mirror image:
+   * they are deleted at /boards/{id}/columns/{id}, not through the space.)
+   */
+  async updateBoard(
+    spaceId: number,
+    boardId: number,
+    params: { title?: string; description?: string },
+    signal?: AbortSignal
+  ): Promise<KaitenBoard> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.patch(`/spaces/${spaceId}/boards/${boardId}`, params, { signal });
+      return response.data;
+    }, signal);
+  }
+
   // Board справочники (columns, lanes, types)
   async getColumns(boardId: number, signal?: AbortSignal): Promise<KaitenColumn[]> {
     return this.queuedRequest(async () => {
@@ -812,6 +1009,43 @@ export class KaitenClient {
       });
       return response.data;
     }, signal);
+  }
+
+  /**
+   * Users page the same way cards do: `limit=200` answers with 100 rows. Asks
+   * for one row more than wanted so `has_more` is a fact, not a guess.
+   */
+  async getUsersPaged(
+    params: { query?: string; limit: number; offset?: number },
+    signal?: AbortSignal
+  ): Promise<PagedResult<KaitenUser>> {
+    const maxRequests = 20;
+    const startOffset = params.offset || 0;
+    const items: KaitenUser[] = [];
+    let offset = startOffset;
+    let requests = 0;
+    let exhausted = false;
+
+    while (items.length <= params.limit && requests < maxRequests) {
+      const pageSize = Math.min(KAITEN_PAGE_SIZE, params.limit - items.length + 1);
+      const page = await this.getUsers({ query: params.query, limit: pageSize, offset }, signal);
+      requests++;
+      items.push(...page);
+      if (page.length < pageSize) {
+        exhausted = true;
+        break;
+      }
+      offset += page.length;
+    }
+
+    const has_more = !exhausted && (items.length > params.limit || requests >= maxRequests);
+    const trimmed = items.slice(0, params.limit);
+    return {
+      items: trimmed,
+      has_more,
+      next_offset: has_more ? startOffset + trimmed.length : null,
+      requests,
+    };
   }
 
   // Queue status (for debugging)
