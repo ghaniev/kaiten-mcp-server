@@ -32,9 +32,13 @@ import {
   SearchCardsParams,
   KAITEN_PAGE_SIZE,
 } from './kaiten-client.js';
+import { PropertyResolver } from './card-properties.js';
 import {
   CardViewContext,
+  cardUrl,
   projectCard,
+  projectParents,
+  type ParentRef,
   projectBoard,
   projectCardBrief,
   projectCards,
@@ -150,6 +154,41 @@ const cardCtx: CardViewContext = {
   baseUrl: webBaseUrl(API_URL!),
   defaultSpaceId: DEFAULT_SPACE_ID,
 };
+
+// Custom field names and select-option texts, cached for the cache TTL.
+const propertyResolver = new PropertyResolver(kaitenClient, config.KAITEN_CACHE_TTL_SECONDS * 1000);
+
+/**
+ * Fills cardCtx.boardSpaces from GET /spaces (cached), which lists every
+ * space with its boards. Cards themselves do not say which space they are in.
+ * A failure only degrades links to the default-space / short form.
+ */
+async function ensureBoardSpaces(signal?: AbortSignal): Promise<void> {
+  try {
+    let spaces = cache.getSpaces();
+    if (!spaces) {
+      spaces = await kaitenClient.getSpaces(signal);
+      cache.setSpaces(spaces);
+    } else if (cardCtx.boardSpaces) {
+      return;
+    }
+    const map = new Map<number, number>();
+    for (const space of spaces) {
+      for (const board of space.boards || []) {
+        if (!map.has(board.id)) map.set(board.id, space.id);
+      }
+    }
+    cardCtx.boardSpaces = map;
+  } catch (error) {
+    safeLog.warn(`Could not load spaces for card links: ${error}`);
+  }
+}
+
+/** simplifyCard() plus custom fields with their names resolved. */
+async function describeCard(card: KaitenCard, signal?: AbortSignal): Promise<SimplifiedCard> {
+  const properties = await propertyResolver.resolve(card.properties, signal);
+  return { ...simplifyCard(card), properties };
+}
 
 /**
  * One card, compact by default; `verbose` returns the raw object minus avatars.
@@ -332,13 +371,13 @@ interface SimplifiedCard {
   archived: boolean;
   size: number | null;
   due_date: string | null;
+  parents: ParentRef[];
   checklists: ProjectedChecklist[];
+  /** Custom fields by name; filled by describeCard(). */
+  properties?: Record<string, unknown>;
 }
 
 function simplifyCard(card: KaitenCard): SimplifiedCard {
-  const baseUrl = API_URL!.replace('/api/latest', '');
-  const spaceId = card.space_id || card.board?.space_id || DEFAULT_SPACE_ID || '';
-  const cardUrl = `${baseUrl}/space/${spaceId}/card/${card.id}`;
 
   const blockInfo = card.blocked && card.blockers && card.blockers.length > 0
     ? {
@@ -354,7 +393,7 @@ function simplifyCard(card: KaitenCard): SimplifiedCard {
   return {
     id: card.id,
     title: card.title,
-    url: cardUrl,
+    url: cardUrl(card, cardCtx),
     description: card.description || null,
     created: card.created,
     updated: card.updated,
@@ -378,6 +417,7 @@ function simplifyCard(card: KaitenCard): SimplifiedCard {
     archived: !!card.archived,
     size: card.size || null,
     due_date: card.due_date || null,
+    parents: projectParents(card),
     checklists: projectChecklists(card.checklists),
   };
 }
@@ -3310,8 +3350,9 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
         throw new Error(`Invalid card ID: ${pathParts[0]}`);
       }
 
+      await ensureBoardSpaces();
       const card = await kaitenClient.getCard(cardId);
-      const simplified = simplifyCard(card);
+      const simplified = await describeCard(card);
 
       return {
         contents: [{
@@ -3433,19 +3474,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   try {
+    // Card links need the board → space map; one cached GET /spaces per TTL.
+    if (!name.startsWith('kaiten_cache_') && name !== 'kaiten_set_log_level' && name !== 'kaiten_get_status') {
+      await ensureBoardSpaces(signal);
+    }
+
     switch (name) {
       case 'kaiten_get_card': {
         const validatedArgs = GetCardSchema.parse(args);
         const card = await kaitenClient.getCard(validatedArgs.card_id, signal);
-        const simplified = simplifyCard(card);
+        const simplified = await describeCard(card, signal);
 
         // Check format parameter
         const format = validatedArgs.format || 'markdown';
 
         // JSON: the compact projection. The raw card is 8-77 KB, mostly base64
         // avatars and whole child cards; verbose=true returns it minus avatars.
+        // Custom fields go by name in both: raw they are {id_N: [optionId]}.
         if (format === 'json') {
-          return jsonContent(renderCard(card, validatedArgs.verbose));
+          return jsonContent(
+            validatedArgs.verbose
+              ? { ...renderCard(card, true), properties_named: simplified.properties }
+              : { ...renderCard(card, false), properties: simplified.properties }
+          );
         }
 
         // Markdown format (default)
@@ -3472,6 +3523,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (simplified.blocker_name) output += `   Blocker: ${simplified.blocker_name}\n`;
         }
         if (simplified.tags.length > 0) output += `🏷️ Tags: ${simplified.tags.join(', ')}\n`;
+        const fields = Object.entries(simplified.properties || {});
+        if (fields.length > 0) {
+          output += `🧩 Fields:\n`;
+          for (const [fieldName, value] of fields) {
+            const shown = Array.isArray(value) ? value.join(', ') : typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value);
+            output += `   • ${fieldName}: ${shown}\n`;
+          }
+        }
         if (simplified.members.length > 0) output += `👥 Members: ${simplified.members.join(', ')}\n`;
         output += `💬 Comments: ${simplified.comments_total}`;
         if (simplified.last_comment_date) output += ` (last: ${simplified.last_comment_date})`;
@@ -3487,6 +3546,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           if (hasParents) {
             output += `📌 Parent cards: ${card.parents_count}\n`;
+            for (const parent of simplified.parents) {
+              output += `   • [#${parent.id}] ${parent.title ?? ''} — ${cardUrl({ id: parent.id, board_id: (card.parents || []).find((p) => p.id === parent.id)?.board_id }, cardCtx)}\n`;
+            }
           }
 
           if (hasChildren) {
@@ -3516,9 +3578,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 );
 
                 childrenWithBlockingDetails.forEach((child, index) => {
-                  const baseUrl = API_URL!.replace('/api/latest', '');
-                  const childSpaceId = child.space_id || child.board?.space_id || DEFAULT_SPACE_ID || '';
-                  const childUrl = `${baseUrl}/space/${childSpaceId}/card/${child.id}`;
+                  const childUrl = cardUrl(child, cardCtx);
 
                   // State icons: 1=queued (⏳), 2=in progress (🔄), 3=done (✅)
                   const stateIcon = child.state === 3 ? '✅' : child.state === 2 ? '🔄' : '⏳';
@@ -3543,7 +3603,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           if (hasParents) {
-            output += `\nℹ️ To view parent card details, search by parent card ID in Kaiten.\n`;
+            output += `\nℹ️ Parent card details (the full spec): kaiten_get_card({card_id: <parent id>}).\n`;
           }
         }
 
@@ -3620,7 +3680,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ]);
         const attachments = listCardAttachments(card.files);
         const context = {
-          card: simplifyCard(card),
+          card: await describeCard(card, signal),
           comments: comments.map(simplifyComment),
           attachments,
         };
@@ -4751,6 +4811,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'kaiten_cache_invalidate_all': {
         cache.invalidateAll();
+        propertyResolver.invalidate();
         return {
           content: [
             {

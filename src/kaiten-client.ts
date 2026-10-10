@@ -134,6 +134,10 @@ export interface KaitenCard {
   checklists?: KaitenChecklist[];
   // Card relationships (counts from API)
   parents_count?: number;
+  /** Present on GET /cards/{id} and on /cards search rows. */
+  parents_ids?: number[] | null;
+  /** GET /cards/{id} only: the parent cards themselves (heavy; read id/title). */
+  parents?: KaitenCard[];
   children_count?: number;
   children_done?: number;
   // Populated by additional requests
@@ -271,6 +275,21 @@ export interface KaitenChecklist {
   created?: string;
   updated?: string;
   items?: KaitenChecklistItem[] | null;
+}
+
+export interface KaitenCustomProperty {
+  id: number;
+  name: string;
+  /** string | number | date | select | user | email | checkbox | formula | ... */
+  type: string;
+  multi_select?: boolean;
+  condition?: string;
+}
+
+export interface KaitenSelectValue {
+  id: number;
+  custom_property_id?: number;
+  value: string;
 }
 
 export interface ChecklistItemFields {
@@ -855,6 +874,65 @@ export class KaitenClient {
       const response = await this.client.delete(`/cards/${cardId}/blockers/${blockerRecordId}`, { signal });
       return response.data;
     }, signal);
+  }
+
+  // Custom properties. Both endpoints take the id filter only as `ids[]=a&ids[]=b`:
+  // a single plain `ids=a` is ignored and answers the whole list. Pages cap at
+  // 100, so ids go in chunks of 100.
+  async getCustomProperties(ids: number[], signal?: AbortSignal): Promise<KaitenCustomProperty[]> {
+    const result: KaitenCustomProperty[] = [];
+    for (let i = 0; i < ids.length; i += KAITEN_PAGE_SIZE) {
+      const query = new URLSearchParams({ load_by_ids: 'true', compact: 'true' });
+      ids.slice(i, i + KAITEN_PAGE_SIZE).forEach((id) => query.append('ids[]', String(id)));
+      const page = await this.queuedRequest(async () => {
+        const response = await this.client.get(`/company/custom-properties?${query}`, { signal });
+        return response.data as KaitenCustomProperty[];
+      }, signal);
+      result.push(...page);
+    }
+    return result;
+  }
+
+  async getCustomPropertySelectValues(
+    propertyId: number,
+    ids: number[],
+    signal?: AbortSignal
+  ): Promise<KaitenSelectValue[]> {
+    const result: KaitenSelectValue[] = [];
+    for (let i = 0; i < ids.length; i += KAITEN_PAGE_SIZE) {
+      const query = new URLSearchParams({ limit: String(KAITEN_PAGE_SIZE) });
+      ids.slice(i, i + KAITEN_PAGE_SIZE).forEach((id) => query.append('ids[]', String(id)));
+      const page = await this.queuedRequest(async () => {
+        const response = await this.client.get(`/company/custom-properties/${propertyId}/select-values?${query}`, { signal });
+        return response.data as KaitenSelectValue[];
+      }, signal);
+      result.push(...page);
+    }
+    return result;
+  }
+
+  /**
+   * Users by id, deactivated ones included: a user custom property on
+   * GET /cards/{id} holds bare ids, often of accounts that were deactivated
+   * since — /users without include_inactive does not return those.
+   * Unlike the custom-property endpoints, /users wants `ids=a,b`: repeated
+   * keys or `ids[]` silently keep only one id.
+   */
+  async getUsersByIds(ids: number[], signal?: AbortSignal): Promise<KaitenUser[]> {
+    const result: KaitenUser[] = [];
+    for (let i = 0; i < ids.length; i += KAITEN_PAGE_SIZE) {
+      const query = new URLSearchParams({
+        include_inactive: 'true',
+        limit: String(KAITEN_PAGE_SIZE),
+        ids: ids.slice(i, i + KAITEN_PAGE_SIZE).join(','),
+      });
+      const page = await this.queuedRequest(async () => {
+        const response = await this.client.get(`/users?${query}`, { signal });
+        return response.data as KaitenUser[];
+      }, signal);
+      result.push(...page);
+    }
+    return result;
   }
 
   // Checklists. There is no "list checklists" endpoint: they come embedded in

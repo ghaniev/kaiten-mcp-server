@@ -279,3 +279,44 @@ test('a caller-supplied idempotency key reaches the request', async () => {
   // and the key itself is not sent as a card field
   assert.equal('idempotency_key' in requests[0].body, false);
 });
+
+test('id filters use the encoding each endpoint honours', async () => {
+  // Live API, 2026-10-10: custom-properties and select-values ignore a single
+  // plain `ids=N` (whole list back) but honour `ids[]`; /users honours only
+  // `ids=a,b` and keeps one id out of repeated keys.
+  const { client, requests } = makeClient(() => ({ status: 200, data: [] }));
+
+  await client.getCustomProperties([101]);
+  await client.getCustomPropertySelectValues(202, [3001, 3002]);
+  await client.getUsersByIds([1001, 1002]);
+
+  assert.deepEqual(requests[0].params.getAll('ids[]'), ['101']);
+  assert.equal(requests[0].params.has('ids'), false);
+  assert.equal(requests[0].params.get('load_by_ids'), 'true');
+  assert.equal(requests[1].url, '/company/custom-properties/202/select-values');
+  assert.deepEqual(requests[1].params.getAll('ids[]'), ['3001', '3002']);
+  assert.equal(requests[2].params.get('ids'), '1001,1002');
+  assert.equal(requests[2].params.get('include_inactive'), 'true');
+});
+
+test('checklist endpoints address items through their checklist', async () => {
+  const { client, requests } = makeClient(() => ({ status: 200, data: { id: 1 } }));
+
+  await client.createChecklist(42, { name: 'QA' });
+  await client.addChecklistItem(42, 7, { text: 'a', sort_order: 1 });
+  await client.updateChecklistItem(42, 7, 9, { checked: true });
+  await client.deleteChecklistItem(42, 7, 9);
+  await client.deleteChecklist(42, 7);
+
+  assert.deepEqual(
+    requests.map((r) => `${r.method} ${r.url}`),
+    [
+      'post /cards/42/checklists',
+      'post /cards/42/checklists/7/items',
+      'patch /cards/42/checklists/7/items/9',
+      'delete /cards/42/checklists/7/items/9',
+      'delete /cards/42/checklists/7',
+    ]
+  );
+  assert.deepEqual(requests[2].body, { checked: true });
+});

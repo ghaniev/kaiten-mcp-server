@@ -9,9 +9,20 @@
   `kaiten_delete_checklist_item`. Инструментам для пунктов хватает `item_id`: чек-лист
   находится по карточке. Пункты добавляются по одному с явным `sort_order`; отклонённый пункт
   попадает в `failed` и не останавливает остальные.
+- **Пользовательские поля по названиям** в `kaiten_get_card` (markdown: блок «🧩 Fields»; json:
+  `properties`, с `verbose` — `properties_named` рядом с сырыми) и `kaiten_get_task_context`:
+  `{"Version": "1.0.0"}` вместо `{id_101: [3001]}`. Списки, пользователи (включая
+  деактивированных), даты разбираются; недоступное токену поле остаётся под `id_N`.
+- **Родители:** `parents: [{id, title}]` в проекции карточки и в `kaiten_get_task_context`;
+  в markdown `kaiten_get_card` — список родителей со ссылками вместо одного счётчика.
 - Чек-листы с пунктами видны в `kaiten_get_card` (markdown: `- [x]` / `- [ ]` с `item_id`;
   json: поле `checklists`) и в `kaiten_get_task_context`. Аватарки из `checked_by` и
   `responsible` пунктов вырезаются.
+
+### Fixed
+- Ссылки на карточки: в карточке нет `space_id`, и ссылка строилась из default space — неверно
+  для других пространств, а без `KAITEN_DEFAULT_SPACE_ID` выходило `/space//card/N`. Пространство
+  теперь находится по доске через `GET /spaces`, крайний случай — короткая ссылка `/<card_id>`.
 
 ## [Unreleased] - 2026-09-21
 

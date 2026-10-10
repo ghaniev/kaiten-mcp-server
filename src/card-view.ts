@@ -25,6 +25,12 @@ export interface CardViewContext {
   /** Kaiten web base URL, e.g. https://acme.kaiten.ru (no /api/latest). */
   baseUrl: string;
   defaultSpaceId?: number;
+  /**
+   * board id → space id. Cards carry neither `space_id` nor `board.space_id`,
+   * so without this map every link fell back to the default space — or to
+   * `/space//card/N` when none was configured.
+   */
+  boardSpaces?: Map<number, number>;
 }
 
 export interface ProjectedUser {
@@ -58,6 +64,7 @@ export interface ProjectedCard {
   tags: string[];
   sort_order: number | null;
   parents_count: number;
+  parents: ParentRef[];
   children_count: number;
   children_done: number;
   updated: string | null;
@@ -81,8 +88,33 @@ export function webBaseUrl(apiUrl: string): string {
 }
 
 export function cardUrl(card: Partial<KaitenCard>, ctx: CardViewContext): string {
-  const spaceId = card.space_id || card.board?.space_id || ctx.defaultSpaceId || '';
-  return `${ctx.baseUrl}/space/${spaceId}/card/${card.id}`;
+  const boardId = card.board_id ?? card.board?.id;
+  const spaceId =
+    card.space_id ||
+    card.board?.space_id ||
+    (boardId !== undefined ? ctx.boardSpaces?.get(boardId) : undefined) ||
+    ctx.defaultSpaceId;
+  // Kaiten routes /<card id> to the card too; better than an empty space segment.
+  return spaceId ? `${ctx.baseUrl}/space/${spaceId}/card/${card.id}` : `${ctx.baseUrl}/${card.id}`;
+}
+
+export interface ParentRef {
+  id: number;
+  title: string | null;
+}
+
+/**
+ * Parent cards by id. GET /cards/{id} embeds whole parent cards in `parents`;
+ * search rows only have `parents_ids`.
+ */
+export function projectParents(card: Partial<KaitenCard> | any): ParentRef[] {
+  if (Array.isArray(card?.parents) && card.parents.length > 0) {
+    return card.parents.map((p: any) => ({ id: p?.id, title: p?.title ?? null }));
+  }
+  if (Array.isArray(card?.parents_ids)) {
+    return card.parents_ids.map((id: number) => ({ id, title: null }));
+  }
+  return [];
 }
 
 export function projectUser(user: any): ProjectedUser | null {
@@ -153,6 +185,7 @@ export function projectCard(
     tags: Array.isArray(card?.tags) ? card.tags.map((t: any) => t?.name).filter(Boolean) : [],
     sort_order: typeof card?.sort_order === 'number' ? card.sort_order : null,
     parents_count: card?.parents_count ?? 0,
+    parents: projectParents(card),
     children_count: card?.children_count ?? 0,
     children_done: card?.children_done ?? 0,
     updated: card?.updated ?? null,

@@ -10,6 +10,7 @@ import {
   projectKaitenUser,
   projectCards,
   projectMember,
+  projectParents,
   renderCardLine,
   stripAvatars,
   webBaseUrl,
@@ -173,6 +174,29 @@ test('card URL falls back from space_id to the board space to the default', () =
     'https://acme.kaiten.ru/space/42/card/5'
   );
   assert.equal(cardUrl({ id: 5 } as any, ctx), 'https://acme.kaiten.ru/space/792695/card/5');
+});
+
+test('card URL takes the space from the board map before the default space', () => {
+  // Live cards carry neither space_id nor board.space_id.
+  const mapped = { ...ctx, boardSpaces: new Map([[2002, 111]]) };
+  assert.equal(cardUrl({ id: 5, board_id: 2002 } as any, mapped), 'https://acme.kaiten.ru/space/111/card/5');
+  assert.equal(cardUrl({ id: 5, board: { id: 2002 } } as any, mapped), 'https://acme.kaiten.ru/space/111/card/5');
+  assert.equal(cardUrl({ id: 5, board_id: 1 } as any, mapped), 'https://acme.kaiten.ru/space/792695/card/5');
+});
+
+test('without any space the card URL is the short form, never /space//card', () => {
+  const bare = { baseUrl: 'https://acme.kaiten.ru' };
+  assert.equal(cardUrl({ id: 5, board_id: 1 } as any, bare), 'https://acme.kaiten.ru/5');
+});
+
+test('parents come with titles from a full card, as bare ids from a search row', () => {
+  assert.deepEqual(
+    projectParents({ parents: [{ id: 7, title: 'Epic', members: [] }], parents_ids: [7] }),
+    [{ id: 7, title: 'Epic' }]
+  );
+  assert.deepEqual(projectParents({ parents_ids: [7, 8] }), [{ id: 7, title: null }, { id: 8, title: null }]);
+  assert.deepEqual(projectParents({ parents_count: 0 }), []);
+  assert.deepEqual(projectCard({ id: 1, parents_ids: [7] }, ctx).parents, [{ id: 7, title: null }]);
 });
 
 test('web base url is the api url without /api/latest', () => {
