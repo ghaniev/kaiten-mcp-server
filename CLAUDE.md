@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server for Kaiten API integration. It provides 47 tools for managing Kaiten cards, members, blockers, card order, comments, spaces, and boards directly from Claude Desktop. The server is production-ready with comprehensive logging, caching, retry logic, and concurrency control.
+This is an MCP (Model Context Protocol) server for Kaiten API integration. It provides 55 tools for managing Kaiten cards, members, blockers, checklists, card order, comments, spaces, and boards directly from Claude Desktop. The server is production-ready with comprehensive logging, caching, retry logic, and concurrency control.
 
 **Current Version:** 2.3.0
 
@@ -48,7 +48,7 @@ Reference: src/config.ts:126-152 implements the `safeLog` wrapper.
 
 1. **src/index.ts** (main MCP server)
    - Implements MCP Server with stdio transport
-   - Defines 47 tool handlers (cards, members/responsible, blockers, order, bulk, comments, spaces, boards, cache, logging)
+   - Defines 55 tool handlers (cards, members/responsible, blockers, checklists, order, bulk, comments, spaces, boards, cache, logging)
    - Implements MCP Resources (kaiten-card:///, kaiten-space:///, etc.)
    - Implements Server Prompts with usage instructions
    - Uses Zod schemas for all tool parameter validation
@@ -119,6 +119,11 @@ Reference: src/config.ts:126-152 implements the `safeLog` wrapper.
   7-77 KB, dominated by base64 avatars, nested child cards and `path_data`.
 - `verbose: true` returns the full object through `stripAvatars()` — avatars never ship.
 - Bulk answers use `projectCardBrief()` (one line per card).
+
+**Checklists Pattern (src/checklists.ts):**
+- No list endpoint: checklists come embedded in `GET /cards/{id}` (key absent when there are none).
+- Item tools take only `item_id`; the checklist is resolved from the card via `findItemChecklist()`.
+- Items are always projected (`projectChecklist()`): the raw ones embed users with base64 avatars.
 
 **Card Operations Pattern (src/card-ops.ts):**
 - The assignee is a card MEMBER with `type: 2`; `owner` is who set the task.

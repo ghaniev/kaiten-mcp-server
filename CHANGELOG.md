@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased] - 2026-10-10
+
+### Added
+- **Чек-листы.** `kaiten_list_card_checklists`, `kaiten_create_checklist` (сразу с пунктами),
+  `kaiten_update_checklist`, `kaiten_delete_checklist`, `kaiten_add_checklist_items`,
+  `kaiten_update_checklist_item`, `kaiten_set_checklist_items_checked` (пачкой),
+  `kaiten_delete_checklist_item`. Инструментам для пунктов хватает `item_id`: чек-лист
+  находится по карточке. Пункты добавляются по одному с явным `sort_order`; отклонённый пункт
+  попадает в `failed` и не останавливает остальные.
+- Чек-листы с пунктами видны в `kaiten_get_card` (markdown: `- [x]` / `- [ ]` с `item_id`;
+  json: поле `checklists`) и в `kaiten_get_task_context`. Аватарки из `checked_by` и
+  `responsible` пунктов вырезаются.
+
 ## [Unreleased] - 2026-09-21
 
 Ветка `feat/card-ops-and-compact-responses`. Всё, что ниже, проверено живым API

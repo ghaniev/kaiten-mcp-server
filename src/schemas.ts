@@ -325,6 +325,89 @@ export const UnblockCardSchema = z.object({
   });
 
 // ============================================
+// CHECKLIST SCHEMAS
+// ============================================
+
+const ChecklistDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD');
+
+const NewChecklistItemSchema = z.object({
+  text: z.string().min(1).max(4096).describe('Item text'),
+  checked: z.boolean().optional().describe('Create the item already checked'),
+  due_date: ChecklistDateSchema.optional().describe('Item due date, YYYY-MM-DD'),
+  responsible_id: z.number().positive().int().optional().describe('User responsible for the item'),
+}).strict();
+
+/** Plain strings are accepted as items: ["a", "b"] is the common case. */
+const ChecklistItemsInputSchema = z.array(
+  z.union([z.string().min(1).max(4096), NewChecklistItemSchema])
+    .transform((v) => (typeof v === 'string' ? { text: v } : v))
+);
+
+export const ListCardChecklistsSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+}).strict();
+
+export const CreateChecklistSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  name: z.string().min(1).max(1024).describe('Checklist name'),
+  items: ChecklistItemsInputSchema.max(100).optional().default([])
+    .describe('Items to add, in order: strings or {text, checked, due_date, responsible_id}'),
+}).strict();
+
+export const UpdateChecklistSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  checklist_id: z.number().positive().int().describe('The checklist ID'),
+  name: z.string().min(1).max(1024).optional().describe('New checklist name'),
+  sort_order: z.number().positive().optional().describe('Position among the checklists of the card'),
+})
+  .strict()
+  .refine((v) => v.name !== undefined || v.sort_order !== undefined, {
+    message: 'Pass name or sort_order',
+    path: ['name'],
+  });
+
+export const DeleteChecklistSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  checklist_id: z.number().positive().int().describe('The checklist ID'),
+}).strict();
+
+export const AddChecklistItemsSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  checklist_id: z.number().positive().int().describe('The checklist ID'),
+  items: ChecklistItemsInputSchema.min(1).max(100)
+    .describe('Items to append, in order: strings or {text, checked, due_date, responsible_id}'),
+}).strict();
+
+export const UpdateChecklistItemSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  item_id: z.number().positive().int().describe('The checklist item ID'),
+  text: z.string().min(1).max(4096).optional().describe('New item text'),
+  checked: z.boolean().optional().describe('Check (true) or uncheck (false) the item'),
+  due_date: ChecklistDateSchema.nullable().optional().describe('YYYY-MM-DD, or null to clear'),
+  responsible_id: z.number().positive().int().nullable().optional().describe('User ID, or null to clear'),
+  sort_order: z.number().positive().optional().describe('Position inside the checklist'),
+  move_to_checklist_id: z.number().positive().int().optional()
+    .describe('Move the item to another checklist of the same card'),
+})
+  .strict()
+  .refine(
+    (v) => ['text', 'checked', 'due_date', 'responsible_id', 'sort_order', 'move_to_checklist_id']
+      .some((key) => (v as Record<string, unknown>)[key] !== undefined),
+    { message: 'Pass at least one field to change', path: ['text'] }
+  );
+
+export const SetChecklistItemsCheckedSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  item_ids: z.array(z.number().positive().int()).min(1).max(100).describe('Checklist item IDs'),
+  checked: z.boolean().optional().default(true).describe('true checks, false unchecks'),
+}).strict();
+
+export const DeleteChecklistItemSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  item_id: z.number().positive().int().describe('The checklist item ID'),
+}).strict();
+
+// ============================================
 // ORDERING SCHEMAS
 // ============================================
 
@@ -541,6 +624,14 @@ export type RemoveCardMemberArgs = z.infer<typeof RemoveCardMemberSchema>;
 export type ListCardBlockersArgs = z.infer<typeof ListCardBlockersSchema>;
 export type BlockCardArgs = z.infer<typeof BlockCardSchema>;
 export type UnblockCardArgs = z.infer<typeof UnblockCardSchema>;
+export type ListCardChecklistsArgs = z.infer<typeof ListCardChecklistsSchema>;
+export type CreateChecklistArgs = z.infer<typeof CreateChecklistSchema>;
+export type UpdateChecklistArgs = z.infer<typeof UpdateChecklistSchema>;
+export type DeleteChecklistArgs = z.infer<typeof DeleteChecklistSchema>;
+export type AddChecklistItemsArgs = z.infer<typeof AddChecklistItemsSchema>;
+export type UpdateChecklistItemArgs = z.infer<typeof UpdateChecklistItemSchema>;
+export type SetChecklistItemsCheckedArgs = z.infer<typeof SetChecklistItemsCheckedSchema>;
+export type DeleteChecklistItemArgs = z.infer<typeof DeleteChecklistItemSchema>;
 export type SetCardOrderArgs = z.infer<typeof SetCardOrderSchema>;
 export type ReorderCardsArgs = z.infer<typeof ReorderCardsSchema>;
 export type BulkMoveCardsArgs = z.infer<typeof BulkMoveCardsSchema>;

@@ -45,6 +45,17 @@ import {
 } from './card-view.js';
 import type { BulkResult } from './card-ops.js';
 import {
+  appendChecklistItems,
+  createChecklistWithItems,
+  findItemChecklist,
+  projectChecklist,
+  projectChecklistItem,
+  projectChecklists,
+  renderChecklistsMarkdown,
+  updateChecklistItems,
+  type ProjectedChecklist,
+} from './checklists.js';
+import {
   addCardParticipant,
   bulkSetResponsible,
   bulkUpdateCards,
@@ -90,6 +101,14 @@ import {
   ListCardBlockersSchema,
   BlockCardSchema,
   UnblockCardSchema,
+  ListCardChecklistsSchema,
+  CreateChecklistSchema,
+  UpdateChecklistSchema,
+  DeleteChecklistSchema,
+  AddChecklistItemsSchema,
+  UpdateChecklistItemSchema,
+  SetChecklistItemsCheckedSchema,
+  DeleteChecklistItemSchema,
   SetCardOrderSchema,
   ReorderCardsSchema,
   BulkMoveCardsSchema,
@@ -132,9 +151,15 @@ const cardCtx: CardViewContext = {
   defaultSpaceId: DEFAULT_SPACE_ID,
 };
 
-/** One card, compact by default; `verbose` returns the raw object minus avatars. */
+/**
+ * One card, compact by default; `verbose` returns the raw object minus avatars.
+ * The full view (with description) also carries the checklists: they are part
+ * of what the task says, not metadata.
+ */
 function renderCard(card: KaitenCard, verbose: boolean, withDescription = true) {
-  return verbose ? stripAvatars(card) : projectCard(card, cardCtx, { description: withDescription });
+  if (verbose) return stripAvatars(card);
+  const projected = projectCard(card, cardCtx, { description: withDescription });
+  return withDescription ? { ...projected, checklists: projectChecklists(card.checklists) } : projected;
 }
 
 function jsonContent(payload: unknown) {
@@ -307,6 +332,7 @@ interface SimplifiedCard {
   archived: boolean;
   size: number | null;
   due_date: string | null;
+  checklists: ProjectedChecklist[];
 }
 
 function simplifyCard(card: KaitenCard): SimplifiedCard {
@@ -351,7 +377,8 @@ function simplifyCard(card: KaitenCard): SimplifiedCard {
     ...blockInfo,
     archived: !!card.archived,
     size: card.size || null,
-    due_date: card.due_date || null
+    due_date: card.due_date || null,
+    checklists: projectChecklists(card.checklists),
   };
 }
 
@@ -476,7 +503,8 @@ Markdown format includes:
   - Detailed subtasks list with progress percentage
   - Each subtask shows: state icon (✅ done, 🔄 in progress, ⏳ queued), card ID, title, blocking status, owner, URL
   - Blocking reasons displayed for blocked subtasks
-- Full description at the end
+- Full description
+- Checklists at the end: "- [x] text" / "- [ ] text" with checklist_id and item_id for kaiten_*_checklist* tools
 
 USAGE EXAMPLES:
 ✅ DO: After search to get full details: kaiten_search_cards({query: "payment"}) → kaiten_get_card({card_id: 12345})
@@ -2799,6 +2827,182 @@ The record is not deleted, it is marked released; the card's blocked flag clears
   },
 
   // ============================================
+  // CHECKLISTS
+  // ============================================
+  {
+    name: 'kaiten_list_card_checklists',
+    description: `List the checklists of a card with every item and its checked state.
+
+Kaiten has no separate list endpoint: checklists come with the card. kaiten_get_card shows them too; use this when only the checklists are needed.
+
+RETURNS: {card_id, done, total, checklists: [{id, name, done, total, items: [{id, text, checked, checked_by, checked_at, responsible, due_date}]}]} - items in display order. "id" of a checklist is checklist_id, "id" of an item is item_id for the other checklist tools.`,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+      },
+      required: ['card_id'],
+    },
+  },
+  {
+    name: 'kaiten_create_checklist',
+    description: `Create a checklist on a card, optionally with its items in one call.
+
+PARAMETERS:
+- name: checklist title, e.g. "Definition of Done"
+- items (optional): in display order; plain strings or {text, checked, due_date: "YYYY-MM-DD", responsible_id}
+  Example: {card_id: 123, name: "QA", items: ["Smoke test", {text: "Regression", responsible_id: 42}]}
+
+RETURNS: {card_id, checklist: {id, name, done, total, items}, failed: [...]} - items are added one by one; a failed item is listed in "failed" and does not stop the rest.`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        name: { type: 'string', description: 'Checklist name' },
+        items: {
+          type: 'array',
+          description: 'Items in order: strings or {text, checked, due_date, responsible_id}',
+          items: {
+            anyOf: [
+              { type: 'string' },
+              {
+                type: 'object',
+                properties: {
+                  text: { type: 'string' },
+                  checked: { type: 'boolean' },
+                  due_date: { type: 'string', description: 'YYYY-MM-DD' },
+                  responsible_id: { type: 'number' },
+                },
+                required: ['text'],
+              },
+            ],
+          },
+        },
+      },
+      required: ['card_id', 'name'],
+    },
+  },
+  {
+    name: 'kaiten_update_checklist',
+    description: `Rename a checklist or change its position among the card's checklists.
+
+PARAMETERS: card_id, checklist_id, and name and/or sort_order (positive number; lower is higher up).`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        checklist_id: { type: 'number', description: 'Checklist ID' },
+        name: { type: 'string', description: 'New name' },
+        sort_order: { type: 'number', description: 'New position' },
+      },
+      required: ['card_id', 'checklist_id'],
+    },
+  },
+  {
+    name: 'kaiten_delete_checklist',
+    description: `Delete a checklist with all of its items. Cannot be undone - confirm with the user first.`,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        checklist_id: { type: 'number', description: 'Checklist ID' },
+      },
+      required: ['card_id', 'checklist_id'],
+    },
+  },
+  {
+    name: 'kaiten_add_checklist_items',
+    description: `Append one or more items to the end of an existing checklist, in the order given.
+
+PARAMETERS: card_id, checklist_id, items - strings or {text, checked, due_date: "YYYY-MM-DD", responsible_id}.
+
+RETURNS: the whole checklist after the change, plus "failed" for items the API rejected.`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        checklist_id: { type: 'number', description: 'Checklist ID' },
+        items: {
+          type: 'array',
+          description: 'Items in order: strings or {text, checked, due_date, responsible_id}',
+          items: {
+            anyOf: [
+              { type: 'string' },
+              {
+                type: 'object',
+                properties: {
+                  text: { type: 'string' },
+                  checked: { type: 'boolean' },
+                  due_date: { type: 'string', description: 'YYYY-MM-DD' },
+                  responsible_id: { type: 'number' },
+                },
+                required: ['text'],
+              },
+            ],
+          },
+        },
+      },
+      required: ['card_id', 'checklist_id', 'items'],
+    },
+  },
+  {
+    name: 'kaiten_update_checklist_item',
+    description: `Change one checklist item: text, checked state, due date, responsible, position, or move it to another checklist of the card.
+
+The checklist is found from the card, so only item_id is needed. due_date and responsible_id accept null to clear.
+To tick several items at once use kaiten_set_checklist_items_checked.`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        item_id: { type: 'number', description: 'Checklist item ID' },
+        text: { type: 'string', description: 'New text' },
+        checked: { type: 'boolean', description: 'true = checked' },
+        due_date: { type: ['string', 'null'], description: 'YYYY-MM-DD, or null to clear' },
+        responsible_id: { type: ['number', 'null'], description: 'User ID, or null to clear' },
+        sort_order: { type: 'number', description: 'Position inside the checklist' },
+        move_to_checklist_id: { type: 'number', description: 'Target checklist on the same card' },
+      },
+      required: ['card_id', 'item_id'],
+    },
+  },
+  {
+    name: 'kaiten_set_checklist_items_checked',
+    description: `Check (or uncheck with checked: false) several checklist items of one card in one call.
+
+RETURNS: {card_id, updated: [...items], failed: [{item_id, error}]} - an item that is not on the card is reported in "failed".`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        item_ids: { type: 'array', items: { type: 'number' }, description: 'Checklist item IDs' },
+        checked: { type: 'boolean', description: 'Default true; false unchecks' },
+      },
+      required: ['card_id', 'item_ids'],
+    },
+  },
+  {
+    name: 'kaiten_delete_checklist_item',
+    description: `Delete one checklist item. The checklist is found from the card, so only item_id is needed.`,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        item_id: { type: 'number', description: 'Checklist item ID' },
+      },
+      required: ['card_id', 'item_id'],
+    },
+  },
+
+  // ============================================
   // ORDER
   // ============================================
   {
@@ -3345,6 +3549,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (simplified.description) {
           output += `\n## Description\n${simplified.description}\n`;
+        }
+
+        if (simplified.checklists.length > 0) {
+          output += `\n## ☑️ Checklists\n`;
+          output += renderChecklistsMarkdown(simplified.checklists);
         }
 
         return {
@@ -4171,6 +4380,99 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           released,
           ...(failed.length ? { failed } : {}),
           ...(targets.length === 0 ? { message: 'Card has no active blockers' } : {}),
+        });
+      }
+
+      // ============================================
+      // CHECKLISTS
+      // ============================================
+
+      case 'kaiten_list_card_checklists': {
+        const validatedArgs = ListCardChecklistsSchema.parse(args);
+        const card = await kaitenClient.getCard(validatedArgs.card_id, signal);
+        const checklists = projectChecklists(card.checklists);
+        return jsonContent({
+          card_id: card.id,
+          done: checklists.reduce((sum, c) => sum + c.done, 0),
+          total: checklists.reduce((sum, c) => sum + c.total, 0),
+          checklists,
+        });
+      }
+
+      case 'kaiten_create_checklist': {
+        const validatedArgs = CreateChecklistSchema.parse(args);
+        const result = await createChecklistWithItems(
+          kaitenClient, validatedArgs.card_id, validatedArgs.name, validatedArgs.items, signal
+        );
+        return jsonContent(result);
+      }
+
+      case 'kaiten_update_checklist': {
+        const validatedArgs = UpdateChecklistSchema.parse(args);
+        const { card_id, checklist_id, ...body } = validatedArgs;
+        await kaitenClient.updateChecklist(card_id, checklist_id, body, signal);
+        // PATCH answers without items; read the checklist back to return it whole.
+        const checklist = await kaitenClient.getChecklist(card_id, checklist_id, signal);
+        return jsonContent({ card_id, checklist: projectChecklist(checklist) });
+      }
+
+      case 'kaiten_delete_checklist': {
+        const validatedArgs = DeleteChecklistSchema.parse(args);
+        await kaitenClient.deleteChecklist(validatedArgs.card_id, validatedArgs.checklist_id, signal);
+        return jsonContent({
+          card_id: validatedArgs.card_id,
+          deleted_checklist_id: validatedArgs.checklist_id,
+        });
+      }
+
+      case 'kaiten_add_checklist_items': {
+        const validatedArgs = AddChecklistItemsSchema.parse(args);
+        const result = await appendChecklistItems(
+          kaitenClient, validatedArgs.card_id, validatedArgs.checklist_id, validatedArgs.items, signal
+        );
+        return jsonContent(result);
+      }
+
+      case 'kaiten_update_checklist_item': {
+        const validatedArgs = UpdateChecklistItemSchema.parse(args);
+        const { card_id, item_id, move_to_checklist_id, ...fields } = validatedArgs;
+        const card = await kaitenClient.getCard(card_id, signal);
+        const checklist = findItemChecklist(card, item_id);
+        if (!checklist) {
+          throw new Error(`Item ${item_id} is not on card ${card_id}`);
+        }
+        // Called directly rather than through updateChecklistItems, so an API
+        // error keeps its status and hint instead of becoming a string.
+        const item = await kaitenClient.updateChecklistItem(
+          card_id,
+          checklist.id,
+          item_id,
+          move_to_checklist_id !== undefined ? { ...fields, checklist_id: move_to_checklist_id } : fields,
+          signal
+        );
+        return jsonContent({ card_id, checklist_id: move_to_checklist_id ?? checklist.id, item: projectChecklistItem(item) });
+      }
+
+      case 'kaiten_set_checklist_items_checked': {
+        const validatedArgs = SetChecklistItemsCheckedSchema.parse(args);
+        const result = await updateChecklistItems(
+          kaitenClient, validatedArgs.card_id, validatedArgs.item_ids, { checked: validatedArgs.checked }, signal
+        );
+        return jsonContent(result);
+      }
+
+      case 'kaiten_delete_checklist_item': {
+        const validatedArgs = DeleteChecklistItemSchema.parse(args);
+        const card = await kaitenClient.getCard(validatedArgs.card_id, signal);
+        const checklist = findItemChecklist(card, validatedArgs.item_id);
+        if (!checklist) {
+          throw new Error(`Item ${validatedArgs.item_id} is not on card ${validatedArgs.card_id}`);
+        }
+        await kaitenClient.deleteChecklistItem(validatedArgs.card_id, checklist.id, validatedArgs.item_id, signal);
+        return jsonContent({
+          card_id: validatedArgs.card_id,
+          checklist_id: checklist.id,
+          deleted_item_id: validatedArgs.item_id,
         });
       }
 

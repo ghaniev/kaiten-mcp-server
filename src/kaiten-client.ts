@@ -130,6 +130,8 @@ export interface KaitenCard {
   properties?: Record<string, any>;
   custom_fields?: Record<string, any>;
   files?: KaitenFile[];
+  /** Absent (not empty) on cards without checklists, and in /cards search rows. */
+  checklists?: KaitenChecklist[];
   // Card relationships (counts from API)
   parents_count?: number;
   children_count?: number;
@@ -237,6 +239,50 @@ export interface KaitenBlockerRecord {
   created?: string;
   updated?: string;
   blocker?: KaitenUser;
+}
+
+export interface KaitenChecklistItem {
+  id: number;
+  checklist_id?: number;
+  text: string;
+  sort_order?: number;
+  checked: boolean;
+  checker_id?: number | null;
+  checked_at?: string | null;
+  responsible_id?: number | null;
+  /** YYYY-MM-DD */
+  due_date?: string | null;
+  deleted?: boolean;
+  created?: string;
+  updated?: string;
+  /** Full user objects, base64 avatars included — never return them as is. */
+  checked_by?: KaitenUser | null;
+  responsible?: KaitenUser | null;
+}
+
+export interface KaitenChecklist {
+  id: number;
+  card_id?: number;
+  name: string;
+  sort_order?: number;
+  /** Set when the checklist was created from a space template. */
+  policy_id?: number | null;
+  deleted?: boolean;
+  created?: string;
+  updated?: string;
+  items?: KaitenChecklistItem[] | null;
+}
+
+export interface ChecklistItemFields {
+  text?: string;
+  checked?: boolean;
+  sort_order?: number;
+  /** YYYY-MM-DD; null clears it (PATCH only). */
+  due_date?: string | null;
+  /** null removes the responsible (PATCH only). */
+  responsible_id?: number | null;
+  /** PATCH only: moves the item to another checklist of the card. */
+  checklist_id?: number;
 }
 
 /**
@@ -808,6 +854,79 @@ export class KaitenClient {
     return this.queuedRequest(async () => {
       const response = await this.client.delete(`/cards/${cardId}/blockers/${blockerRecordId}`, { signal });
       return response.data;
+    }, signal);
+  }
+
+  // Checklists. There is no "list checklists" endpoint: they come embedded in
+  // GET /cards/{id}. Items are addressed through their checklist.
+  async getChecklist(cardId: number, checklistId: number, signal?: AbortSignal): Promise<KaitenChecklist> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.get(`/cards/${cardId}/checklists/${checklistId}`, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async createChecklist(
+    cardId: number,
+    body: { name: string; sort_order?: number },
+    signal?: AbortSignal
+  ): Promise<KaitenChecklist> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.post(`/cards/${cardId}/checklists`, body, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async updateChecklist(
+    cardId: number,
+    checklistId: number,
+    body: { name?: string; sort_order?: number },
+    signal?: AbortSignal
+  ): Promise<KaitenChecklist> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.patch(`/cards/${cardId}/checklists/${checklistId}`, body, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async deleteChecklist(cardId: number, checklistId: number, signal?: AbortSignal): Promise<void> {
+    return this.queuedRequest(async () => {
+      await this.client.delete(`/cards/${cardId}/checklists/${checklistId}`, { signal });
+    }, signal);
+  }
+
+  async addChecklistItem(
+    cardId: number,
+    checklistId: number,
+    body: ChecklistItemFields & { text: string },
+    signal?: AbortSignal
+  ): Promise<KaitenChecklistItem> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.post(`/cards/${cardId}/checklists/${checklistId}/items`, body, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async updateChecklistItem(
+    cardId: number,
+    checklistId: number,
+    itemId: number,
+    body: ChecklistItemFields,
+    signal?: AbortSignal
+  ): Promise<KaitenChecklistItem> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.patch(
+        `/cards/${cardId}/checklists/${checklistId}/items/${itemId}`,
+        body,
+        { signal }
+      );
+      return response.data;
+    }, signal);
+  }
+
+  async deleteChecklistItem(cardId: number, checklistId: number, itemId: number, signal?: AbortSignal): Promise<void> {
+    return this.queuedRequest(async () => {
+      await this.client.delete(`/cards/${cardId}/checklists/${checklistId}/items/${itemId}`, { signal });
     }, signal);
   }
 
