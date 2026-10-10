@@ -225,6 +225,7 @@ export const SearchCardsSchema = z.object({
   // Multiple IDs (comma-separated strings)
   owner_ids: z.string().optional().describe('Filter by multiple owner IDs (comma-separated, e.g., "123,456,789")'),
   member_ids: z.string().optional().describe('Filter by member IDs (comma-separated)'),
+  responsible_ids: z.string().optional().describe('Filter by responsible user IDs (comma-separated); member_ids matches any role'),
   column_ids: z.string().optional().describe('Filter by multiple column IDs (comma-separated)'),
   type_ids: z.string().optional().describe('Filter by multiple type IDs (comma-separated)'),
   tag_ids: z.string().optional().describe('Filter by tag IDs (comma-separated)'),
@@ -405,6 +406,52 @@ export const SetChecklistItemsCheckedSchema = z.object({
 export const DeleteChecklistItemSchema = z.object({
   card_id: z.number().positive().int().describe('The card ID'),
   item_id: z.number().positive().int().describe('The checklist item ID'),
+}).strict();
+
+// ============================================
+// TAG AND EXTERNAL LINK SCHEMAS
+// ============================================
+
+export const ListTagsSchema = z.object({
+  query: z.string().optional().describe('Substring of the tag name'),
+}).strict();
+
+export const AddCardTagsSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  tags: z.array(z.string().trim().min(1).max(128)).min(1).max(50).describe('Tag names'),
+}).strict();
+
+export const RemoveCardTagsSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  tags: z.array(z.union([z.string().trim().min(1), z.number().positive().int()])).min(1).max(50)
+    .describe('Tag names or tag IDs'),
+}).strict();
+
+export const ListCardExternalLinksSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+}).strict();
+
+export const AddCardExternalLinkSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  url: z.string().url().max(16384).describe('The link URL'),
+  description: z.string().max(512).optional().describe('Link title, e.g. "PR #42"'),
+}).strict();
+
+export const UpdateCardExternalLinkSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  link_id: z.number().positive().int().describe('External link ID'),
+  url: z.string().url().max(16384).optional().describe('New URL'),
+  description: z.string().max(512).nullable().optional().describe('New title, or null to clear'),
+})
+  .strict()
+  .refine((v) => v.url !== undefined || v.description !== undefined, {
+    message: 'Pass url or description',
+    path: ['url'],
+  });
+
+export const RemoveCardExternalLinkSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  link_id: z.number().positive().int().describe('External link ID'),
 }).strict();
 
 // ============================================
@@ -632,6 +679,13 @@ export type AddChecklistItemsArgs = z.infer<typeof AddChecklistItemsSchema>;
 export type UpdateChecklistItemArgs = z.infer<typeof UpdateChecklistItemSchema>;
 export type SetChecklistItemsCheckedArgs = z.infer<typeof SetChecklistItemsCheckedSchema>;
 export type DeleteChecklistItemArgs = z.infer<typeof DeleteChecklistItemSchema>;
+export type ListTagsArgs = z.infer<typeof ListTagsSchema>;
+export type AddCardTagsArgs = z.infer<typeof AddCardTagsSchema>;
+export type RemoveCardTagsArgs = z.infer<typeof RemoveCardTagsSchema>;
+export type ListCardExternalLinksArgs = z.infer<typeof ListCardExternalLinksSchema>;
+export type AddCardExternalLinkArgs = z.infer<typeof AddCardExternalLinkSchema>;
+export type UpdateCardExternalLinkArgs = z.infer<typeof UpdateCardExternalLinkSchema>;
+export type RemoveCardExternalLinkArgs = z.infer<typeof RemoveCardExternalLinkSchema>;
 export type SetCardOrderArgs = z.infer<typeof SetCardOrderSchema>;
 export type ReorderCardsArgs = z.infer<typeof ReorderCardsSchema>;
 export type BulkMoveCardsArgs = z.infer<typeof BulkMoveCardsSchema>;

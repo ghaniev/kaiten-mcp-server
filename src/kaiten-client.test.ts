@@ -320,3 +320,43 @@ test('checklist endpoints address items through their checklist', async () => {
   );
   assert.deepEqual(requests[2].body, { checked: true });
 });
+
+test('card lists ask only for the relations the projection reads, unless told otherwise', async () => {
+  const { client, requests } = makeClient(() => ({ status: 200, data: [] }));
+
+  await client.searchCards({ board_id: 1, responsible_ids: '1001' });
+  await client.searchCards({ board_id: 1, relations: null });
+  await client.searchCards({ board_id: 1, relations: 'members' });
+
+  assert.equal(requests[0].params.get('relations'), 'members,board,column,lane,owner,type,tags');
+  assert.equal(requests[0].params.get('responsible_ids'), '1001');
+  assert.equal(requests[1].params.has('relations'), false, 'null means the API default: everything');
+  assert.equal(requests[1].params.get('board_id'), '1');
+  assert.deepEqual(requests[2].params.getAll('relations'), ['members']);
+});
+
+test('tag and external-link endpoints', async () => {
+  const { client, requests } = makeClient(() => ({ status: 200, data: { id: 1 } }));
+
+  await client.searchTags('bug');
+  await client.addCardTag(42, 'bug');
+  await client.removeCardTag(42, 7);
+  await client.addCardExternalLink(42, { url: 'https://example.com', description: 'PR' });
+  await client.updateCardExternalLink(42, 9, { description: null });
+  await client.removeCardExternalLink(42, 9);
+
+  assert.deepEqual(
+    requests.map((r) => `${r.method} ${r.url}`),
+    [
+      'get /tags',
+      'post /cards/42/tags',
+      'delete /cards/42/tags/7',
+      'post /cards/42/external-links',
+      'patch /cards/42/external-links/9',
+      'delete /cards/42/external-links/9',
+    ]
+  );
+  assert.equal(requests[0].params.get('query'), 'bug');
+  assert.deepEqual(requests[1].body, { name: 'bug' });
+  assert.deepEqual(requests[4].body, { description: null });
+});

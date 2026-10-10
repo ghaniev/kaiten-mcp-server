@@ -85,7 +85,11 @@ export interface KaitenType {
 }
 
 export interface KaitenTag {
+  /** Absent only in old fixtures; the API always sends it. */
+  id?: number;
   name: string;
+  color?: number;
+  archived?: boolean;
 }
 
 export interface KaitenBlocker {
@@ -130,6 +134,8 @@ export interface KaitenCard {
   properties?: Record<string, any>;
   custom_fields?: Record<string, any>;
   files?: KaitenFile[];
+  /** GET /cards/{id} only; trimmed out of /cards rows by CARD_LIST_RELATIONS. */
+  external_links?: KaitenExternalLink[];
   /** Absent (not empty) on cards without checklists, and in /cards search rows. */
   checklists?: KaitenChecklist[];
   // Card relationships (counts from API)
@@ -292,6 +298,22 @@ export interface KaitenSelectValue {
   value: string;
 }
 
+/** A tag as attached to a card: `id` and `tag_id` are both the company tag id. */
+export interface KaitenCardTag extends KaitenTag {
+  id: number;
+  card_id?: number;
+  tag_id?: number;
+}
+
+export interface KaitenExternalLink {
+  id: number;
+  card_id?: number;
+  url: string;
+  description?: string | null;
+  created?: string;
+  updated?: string;
+}
+
 export interface ChecklistItemFields {
   text?: string;
   checked?: boolean;
@@ -360,6 +382,8 @@ export interface SearchCardsParams {
   // Multiple IDs (comma-separated)
   owner_ids?: string;
   member_ids?: string;
+  /** Cards where these users are the RESPONSIBLE (member type 2) — server side. */
+  responsible_ids?: string;
   column_ids?: string;
   type_ids?: string;
   tag_ids?: string;
@@ -374,7 +398,23 @@ export interface SearchCardsParams {
   sort_direction?: string;
   limit?: number;
   skip?: number;
+
+  /**
+   * Which nested objects /cards embeds. Omitted: CARD_LIST_RELATIONS, which is
+   * everything the card projection reads. null: the API default (everything,
+   * external_links / files / path_data included) — only for raw output.
+   */
+  relations?: string | null;
 }
+
+/**
+ * The relations the compact card projection needs. Asking only for these
+ * drops external_links, files and path_data from every row: 1.05 MB → 0.46 MB
+ * for 50 mixed cards on the live API (2026-10-10). Tags, custom properties and
+ * parents_ids are plain fields and stay. `relations=none` is ignored by the
+ * API, so there is no cheaper "nothing at all".
+ */
+export const CARD_LIST_RELATIONS = 'members,board,column,lane,owner,type,tags';
 
 export interface KaitenClientOptions {
   /** Axios adapter override. Only used by tests to answer without a network. */
@@ -935,6 +975,74 @@ export class KaitenClient {
     return result;
   }
 
+  // Tags. Adding by name creates the company tag if it does not exist yet;
+  // removal takes the tag id. /tags?query= is a substring match.
+  async searchTags(query: string, signal?: AbortSignal): Promise<KaitenTag[]> {
+    return this.queuedRequest(async () => {
+      const params = new URLSearchParams({ limit: String(KAITEN_PAGE_SIZE) });
+      if (query) params.set('query', query);
+      const response = await this.client.get(`/tags?${params}`, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async getCardTags(cardId: number, signal?: AbortSignal): Promise<KaitenCardTag[]> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.get(`/cards/${cardId}/tags`, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async addCardTag(cardId: number, name: string, signal?: AbortSignal): Promise<KaitenCardTag> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.post(`/cards/${cardId}/tags`, { name }, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async removeCardTag(cardId: number, tagId: number, signal?: AbortSignal): Promise<void> {
+    return this.queuedRequest(async () => {
+      await this.client.delete(`/cards/${cardId}/tags/${tagId}`, { signal });
+    }, signal);
+  }
+
+  // External links (e.g. a PR or a design file attached to the card).
+  async getCardExternalLinks(cardId: number, signal?: AbortSignal): Promise<KaitenExternalLink[]> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.get(`/cards/${cardId}/external-links`, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async addCardExternalLink(
+    cardId: number,
+    body: { url: string; description?: string | null },
+    signal?: AbortSignal
+  ): Promise<KaitenExternalLink> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.post(`/cards/${cardId}/external-links`, body, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async updateCardExternalLink(
+    cardId: number,
+    linkId: number,
+    body: { url?: string; description?: string | null },
+    signal?: AbortSignal
+  ): Promise<KaitenExternalLink> {
+    return this.queuedRequest(async () => {
+      const response = await this.client.patch(`/cards/${cardId}/external-links/${linkId}`, body, { signal });
+      return response.data;
+    }, signal);
+  }
+
+  async removeCardExternalLink(cardId: number, linkId: number, signal?: AbortSignal): Promise<void> {
+    return this.queuedRequest(async () => {
+      await this.client.delete(`/cards/${cardId}/external-links/${linkId}`, { signal });
+    }, signal);
+  }
+
   // Checklists. There is no "list checklists" endpoint: they come embedded in
   // GET /cards/{id}. Items are addressed through their checklist.
   async getChecklist(cardId: number, checklistId: number, signal?: AbortSignal): Promise<KaitenChecklist> {
@@ -1026,14 +1134,21 @@ export class KaitenClient {
       queryParams.append('sort_by', sortBy);
       queryParams.append('sort_direction', sortDirection);
 
+      const relations = params.relations === undefined ? CARD_LIST_RELATIONS : params.relations;
+      if (relations !== null) {
+        queryParams.append('relations', relations);
+      }
+
       // Add all other parameters (exclude already processed ones)
       Object.entries(params).forEach(([key, value]) => {
         if (
           value !== undefined &&
+          value !== null &&
           key !== 'limit' &&
           key !== 'skip' &&
           key !== 'sort_by' &&
-          key !== 'sort_direction'
+          key !== 'sort_direction' &&
+          key !== 'relations'
         ) {
           queryParams.append(key, value.toString());
         }

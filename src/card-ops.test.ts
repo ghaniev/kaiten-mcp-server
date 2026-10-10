@@ -353,7 +353,7 @@ function cardWith(id: number, members: Array<{ id: number; type: number }>, owne
   return { id, title: `Card ${id}`, owner_id: ownerId, members };
 }
 
-test('"responsible" filters on member type, which the API cannot do server side', async () => {
+test('"responsible" uses the server-side responsible_ids filter and re-checks the member type', async () => {
   const page = [
     cardWith(1, [{ id: 77, type: 2 }]),
     cardWith(2, [{ id: 77, type: 1 }]),
@@ -366,8 +366,17 @@ test('"responsible" filters on member type, which the API cannot do server side'
   assert.deepEqual(result.cards.map((c) => c.id), [1, 3]);
   assert.equal(result.scanned, 4);
   assert.equal(result.has_more, false);
-  // The server-side filter must still be member_ids — that part Kaiten can do.
+  // responsible_ids narrows on the server (verified live); the fake returns
+  // every card anyway, so the client-side type check is what is tested here.
+  assert.equal(client.calls[0].args[0].responsible_ids, '77');
+  assert.equal(client.calls[0].args[0].member_ids, undefined);
+});
+
+test('role "member" and "any" still go through member_ids', async () => {
+  const client = fakeClient({ pages: [[cardWith(1, [{ id: 77, type: 1 }])]] });
+  await findCardsByUser(client, { user_id: 77, role: 'member', limit: 10 });
   assert.equal(client.calls[0].args[0].member_ids, '77');
+  assert.equal(client.calls[0].args[0].responsible_ids, undefined);
 });
 
 test('role "member" excludes the responsible, "any" keeps both', async () => {

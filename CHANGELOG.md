@@ -19,6 +19,21 @@
   json: поле `checklists`) и в `kaiten_get_task_context`. Аватарки из `checked_by` и
   `responsible` пунктов вырезаются.
 
+- **Теги:** `kaiten_list_tags`, `kaiten_add_card_tags`, `kaiten_remove_card_tags`. Имена
+  сверяются с тегами компании без учёта регистра, чтобы не плодить «Bug» рядом с «bug»;
+  новые теги помечаются `new_tag: true`.
+- **Внешние ссылки:** `kaiten_list_card_external_links`, `kaiten_add_card_external_link`
+  (повтор того же URL не дублирует ссылку), `kaiten_update_card_external_link`,
+  `kaiten_remove_card_external_link`. Ссылки видны в `kaiten_get_card` и `kaiten_get_task_context`.
+- `kaiten_search_cards` принимает `responsible_ids`.
+
+### Changed
+- `kaiten_find_cards_by_user(role: responsible)` фильтрует на сервере через `responsible_ids`
+  вместо перебора всех карточек участника: на живом API — 15 просмотренных карточек вместо
+  постраничного прохода по сотням. Запись от 2026-09-21 ниже («серверного фильтра нет») неверна.
+- Списочные инструменты запрашивают у `/cards` только нужные `relations`: ответ меньше примерно
+  в 2 раза (на живом API 1,05 → 0,46 МБ на 50 карточек).
+
 ### Fixed
 - Ссылки на карточки: в карточке нет `space_id`, и ссылка строилась из default space — неверно
   для других пространств, а без `KAITEN_DEFAULT_SPACE_ID` выходило `/space//card/N`. Пространство

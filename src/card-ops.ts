@@ -428,9 +428,12 @@ export interface FindCardsByUserResult {
 /**
  * Cards where a person is the responsible / a member / the owner.
  *
- * Kaiten's `member_ids` filter matches participants of any role, so the
- * responsible-only case is filtered client side on `members[].type === 2`.
- * The scan is paged and the result says whether it stopped early.
+ * Each role goes to its own server-side filter: `owner_id`, `responsible_ids`
+ * (members of type 2 only — checked live on 2026-10-10), or `member_ids`
+ * (participants of ANY role). The role is still checked on every returned card,
+ * because 'member' (ordinary participant only) has no server filter and must
+ * drop the responsible cards that `member_ids` also returns. The scan is paged
+ * and the result says whether it stopped early.
  */
 export async function findCardsByUser(
   client: KaitenClient,
@@ -442,6 +445,8 @@ export async function findCardsByUser(
   const query: SearchCardsParams = { ...filters };
   if (role === 'owner') {
     query.owner_id = user_id;
+  } else if (role === 'responsible') {
+    query.responsible_ids = String(user_id);
   } else {
     query.member_ids = String(user_id);
   }

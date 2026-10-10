@@ -34,6 +34,14 @@ import {
 } from './kaiten-client.js';
 import { PropertyResolver } from './card-properties.js';
 import {
+  addCardTags,
+  addExternalLink,
+  projectExternalLink,
+  projectExternalLinks,
+  removeCardTags,
+  type ProjectedExternalLink,
+} from './card-tags-links.js';
+import {
   CardViewContext,
   cardUrl,
   projectCard,
@@ -113,6 +121,13 @@ import {
   UpdateChecklistItemSchema,
   SetChecklistItemsCheckedSchema,
   DeleteChecklistItemSchema,
+  ListTagsSchema,
+  AddCardTagsSchema,
+  RemoveCardTagsSchema,
+  ListCardExternalLinksSchema,
+  AddCardExternalLinkSchema,
+  UpdateCardExternalLinkSchema,
+  RemoveCardExternalLinkSchema,
   SetCardOrderSchema,
   ReorderCardsSchema,
   BulkMoveCardsSchema,
@@ -198,7 +213,9 @@ async function describeCard(card: KaitenCard, signal?: AbortSignal): Promise<Sim
 function renderCard(card: KaitenCard, verbose: boolean, withDescription = true) {
   if (verbose) return stripAvatars(card);
   const projected = projectCard(card, cardCtx, { description: withDescription });
-  return withDescription ? { ...projected, checklists: projectChecklists(card.checklists) } : projected;
+  return withDescription
+    ? { ...projected, checklists: projectChecklists(card.checklists), external_links: projectExternalLinks(card.external_links) }
+    : projected;
 }
 
 function jsonContent(payload: unknown) {
@@ -372,6 +389,7 @@ interface SimplifiedCard {
   size: number | null;
   due_date: string | null;
   parents: ParentRef[];
+  external_links: ProjectedExternalLink[];
   checklists: ProjectedChecklist[];
   /** Custom fields by name; filled by describeCard(). */
   properties?: Record<string, unknown>;
@@ -418,6 +436,7 @@ function simplifyCard(card: KaitenCard): SimplifiedCard {
     size: card.size || null,
     due_date: card.due_date || null,
     parents: projectParents(card),
+    external_links: projectExternalLinks(card.external_links),
     checklists: projectChecklists(card.checklists),
   };
 }
@@ -1668,7 +1687,8 @@ PARAMETERS:
 - condition (optional): 1=active (default), 2=archived. Only set to 2 when explicitly searching archived cards.
 - Date filters: created_before/after, updated_before/after, due_date_before/after in ISO 8601 format (e.g., "2025-10-22T00:00:00Z")
 - Boolean flags: asap (urgent cards), overdue, done_on_time, archived, with_due_date
-- Multiple IDs: owner_ids, member_ids, column_ids, type_ids, tag_ids as comma-separated strings (e.g., "123,456,789")
+- Multiple IDs: owner_ids, member_ids, responsible_ids, column_ids, type_ids, tag_ids as comma-separated strings (e.g., "123,456,789")
+  member_ids matches participants of ANY role; responsible_ids only the responsible (member type 2)
 - Exclude filters: exclude_board_ids, exclude_owner_ids, exclude_card_ids
 - sort_by (optional): "created" (default), "updated", "title"
 - sort_direction (optional): "desc" (default), "asc"
@@ -1814,7 +1834,11 @@ RELATED TOOLS:
         },
         member_ids: {
           type: 'string',
-          description: 'Member IDs (comma-separated)',
+          description: 'Member IDs (comma-separated), any role',
+        },
+        responsible_ids: {
+          type: 'string',
+          description: 'Responsible user IDs (comma-separated) - only cards where they are the responsible',
         },
         column_ids: {
           type: 'string',
@@ -3043,6 +3067,121 @@ RETURNS: {card_id, updated: [...items], failed: [{item_id, error}]} - an item th
   },
 
   // ============================================
+  // TAGS
+  // ============================================
+  {
+    name: 'kaiten_list_tags',
+    description: `List the company's tags, optionally filtered by a substring of the name.
+
+Use it before tagging, to reuse an existing tag instead of inventing a near-duplicate.
+
+RETURNS: [{id, name}]`,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Substring of the tag name' },
+      },
+    },
+  },
+  {
+    name: 'kaiten_add_card_tags',
+    description: `Attach tags to a card by name.
+
+Kaiten creates a company tag for any name it does not know, so a typo becomes a new tag. Names are matched case-insensitively against existing tags and their spelling is reused; the answer marks truly new tags with new_tag: true. Tags already on the card are skipped.
+
+RETURNS: {card_id, added: [{id, name, new_tag}], already_on_card, failed, tags}`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Tag names' },
+      },
+      required: ['card_id', 'tags'],
+    },
+  },
+  {
+    name: 'kaiten_remove_card_tags',
+    description: `Detach tags from a card, by name (case-insensitive) or by tag id. The company tag itself is kept.
+
+RETURNS: {card_id, removed, not_on_card, failed, tags}`,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        tags: { type: 'array', items: { type: ['string', 'number'] }, description: 'Tag names or IDs' },
+      },
+      required: ['card_id', 'tags'],
+    },
+  },
+
+  // ============================================
+  // EXTERNAL LINKS
+  // ============================================
+  {
+    name: 'kaiten_list_card_external_links',
+    description: `List the external links of a card (PRs, designs, docs). kaiten_get_card shows them too.
+
+RETURNS: {card_id, links: [{id, url, description}]} - "id" is link_id for the other link tools.`,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+      },
+      required: ['card_id'],
+    },
+  },
+  {
+    name: 'kaiten_add_card_external_link',
+    description: `Attach an external link to a card, e.g. the pull request that implements it.
+
+Idempotent by URL: if the card already has this exact URL, nothing is added and the existing link is returned with already_present: true.
+
+Example: {card_id: 123, url: "https://github.com/org/repo/pull/42", description: "PR #42"}`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        url: { type: 'string', description: 'Link URL' },
+        description: { type: 'string', description: 'Link title (max 512)' },
+      },
+      required: ['card_id', 'url'],
+    },
+  },
+  {
+    name: 'kaiten_update_card_external_link',
+    description: `Change the URL or the title of an external link. description: null clears the title.`,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        link_id: { type: 'number', description: 'External link ID' },
+        url: { type: 'string', description: 'New URL' },
+        description: { type: ['string', 'null'], description: 'New title, or null to clear' },
+      },
+      required: ['card_id', 'link_id'],
+    },
+  },
+  {
+    name: 'kaiten_remove_card_external_link',
+    description: `Remove an external link from a card.`,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        link_id: { type: 'number', description: 'External link ID' },
+      },
+      required: ['card_id', 'link_id'],
+    },
+  },
+
+  // ============================================
   // ORDER
   // ============================================
   {
@@ -3158,7 +3297,7 @@ RETURNS: {updated, failed, results: [{card_id, ok, responsible, demoted, error}]
     name: 'kaiten_find_cards_by_user',
     description: `All cards where a person is the responsible (default), a participant, either, or the owner.
 
-WHY: Kaiten's member_ids filter matches any role, and there is no server-side "responsible = X" filter, so the role is applied client side over paged results. The answer says how many cards were scanned and whether the scan stopped early - it never pretends to be complete when it is not.
+HOW: responsible -> server-side responsible_ids; owner -> owner_id; member/any -> member_ids (which matches any role, so "member" drops the responsible cards client side). The role is re-checked on every card. The answer says how many cards were scanned and whether the scan stopped early - it never pretends to be complete when it is not.
 
 PARAMETERS:
 - user_id (required): from kaiten_list_users(query="latin name")
@@ -3523,6 +3662,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (simplified.blocker_name) output += `   Blocker: ${simplified.blocker_name}\n`;
         }
         if (simplified.tags.length > 0) output += `🏷️ Tags: ${simplified.tags.join(', ')}\n`;
+        if (simplified.external_links.length > 0) {
+          output += `🔗 Links:\n`;
+          for (const link of simplified.external_links) {
+            output += `   • ${link.description ? `${link.description} — ` : ''}${link.url} (link_id: ${link.id})\n`;
+          }
+        }
         const fields = Object.entries(simplified.properties || {});
         if (fields.length > 0) {
           output += `🧩 Fields:\n`;
@@ -3946,6 +4091,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Multiple IDs (comma-separated)
         if (validatedArgs.owner_ids) searchParams.owner_ids = validatedArgs.owner_ids;
         if (validatedArgs.member_ids) searchParams.member_ids = validatedArgs.member_ids;
+        if (validatedArgs.responsible_ids) searchParams.responsible_ids = validatedArgs.responsible_ids;
         if (validatedArgs.column_ids) searchParams.column_ids = validatedArgs.column_ids;
         if (validatedArgs.type_ids) searchParams.type_ids = validatedArgs.type_ids;
         if (validatedArgs.tag_ids) searchParams.tag_ids = validatedArgs.tag_ids;
@@ -4537,6 +4683,56 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // ============================================
+      // TAGS
+      // ============================================
+
+      case 'kaiten_list_tags': {
+        const validatedArgs = ListTagsSchema.parse(args);
+        const tags = await kaitenClient.searchTags(validatedArgs.query ?? '', signal);
+        return jsonContent(tags.filter((t) => !t.archived).map((t) => ({ id: t.id, name: t.name })));
+      }
+
+      case 'kaiten_add_card_tags': {
+        const validatedArgs = AddCardTagsSchema.parse(args);
+        return jsonContent(await addCardTags(kaitenClient, validatedArgs.card_id, validatedArgs.tags, signal));
+      }
+
+      case 'kaiten_remove_card_tags': {
+        const validatedArgs = RemoveCardTagsSchema.parse(args);
+        return jsonContent(await removeCardTags(kaitenClient, validatedArgs.card_id, validatedArgs.tags, signal));
+      }
+
+      // ============================================
+      // EXTERNAL LINKS
+      // ============================================
+
+      case 'kaiten_list_card_external_links': {
+        const validatedArgs = ListCardExternalLinksSchema.parse(args);
+        const links = await kaitenClient.getCardExternalLinks(validatedArgs.card_id, signal);
+        return jsonContent({ card_id: validatedArgs.card_id, links: projectExternalLinks(links) });
+      }
+
+      case 'kaiten_add_card_external_link': {
+        const validatedArgs = AddCardExternalLinkSchema.parse(args);
+        return jsonContent(await addExternalLink(
+          kaitenClient, validatedArgs.card_id, validatedArgs.url, validatedArgs.description, signal
+        ));
+      }
+
+      case 'kaiten_update_card_external_link': {
+        const validatedArgs = UpdateCardExternalLinkSchema.parse(args);
+        const { card_id, link_id, ...body } = validatedArgs;
+        const link = await kaitenClient.updateCardExternalLink(card_id, link_id, body, signal);
+        return jsonContent({ card_id, link: projectExternalLink(link) });
+      }
+
+      case 'kaiten_remove_card_external_link': {
+        const validatedArgs = RemoveCardExternalLinkSchema.parse(args);
+        await kaitenClient.removeCardExternalLink(validatedArgs.card_id, validatedArgs.link_id, signal);
+        return jsonContent({ card_id: validatedArgs.card_id, removed_link_id: validatedArgs.link_id });
+      }
+
+      // ============================================
       // ORDER
       // ============================================
 
@@ -4715,6 +4911,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             role: validatedArgs.role,
             limit,
             max_scan: validatedArgs.max_scan,
+            // verbose returns raw cards: ask for every relation, not the trimmed set.
+            relations: validatedArgs.verbose ? null : undefined,
           },
           signal
         );

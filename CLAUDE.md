@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server for Kaiten API integration. It provides 55 tools for managing Kaiten cards, members, blockers, checklists, card order, comments, spaces, and boards directly from Claude Desktop. The server is production-ready with comprehensive logging, caching, retry logic, and concurrency control.
+This is an MCP (Model Context Protocol) server for Kaiten API integration. It provides 62 tools for managing Kaiten cards, members, blockers, checklists, tags, external links, card order, comments, spaces, and boards directly from Claude Desktop. The server is production-ready with comprehensive logging, caching, retry logic, and concurrency control.
 
 **Current Version:** 2.3.0
 
@@ -48,7 +48,7 @@ Reference: src/config.ts:126-152 implements the `safeLog` wrapper.
 
 1. **src/index.ts** (main MCP server)
    - Implements MCP Server with stdio transport
-   - Defines 55 tool handlers (cards, members/responsible, blockers, checklists, order, bulk, comments, spaces, boards, cache, logging)
+   - Defines 62 tool handlers (cards, members/responsible, blockers, checklists, tags, external links, order, bulk, comments, spaces, boards, cache, logging)
    - Implements MCP Resources (kaiten-card:///, kaiten-space:///, etc.)
    - Implements Server Prompts with usage instructions
    - Uses Zod schemas for all tool parameter validation
