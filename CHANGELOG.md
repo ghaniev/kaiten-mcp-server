@@ -3,6 +3,11 @@
 ## [Unreleased] - 2026-10-10
 
 ### Added
+- **Содержимое вложений:** `kaiten_get_card_file` читает файл карточки или комментария по
+  ID/UID. Текст (определяется по содержимому: Kaiten обычно не заполняет `mime_type`)
+  возвращается постранично через `offset`/`max_chars`, картинка — как image, остальное
+  (pdf, архивы, видео) сохраняется в `$TMPDIR/kaiten-mcp-files/<card>/<file>/` и
+  возвращается путь. Лимит размера — `KAITEN_MAX_FILE_BYTES` (по умолчанию 25 МБ).
 - **Чек-листы.** `kaiten_list_card_checklists`, `kaiten_create_checklist` (сразу с пунктами),
   `kaiten_update_checklist`, `kaiten_delete_checklist`, `kaiten_add_checklist_items`,
   `kaiten_update_checklist_item`, `kaiten_set_checklist_items_checked` (пачкой),

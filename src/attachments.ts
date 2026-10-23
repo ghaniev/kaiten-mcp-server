@@ -140,3 +140,36 @@ export function isSafeImageDownloadUrl(value: string): boolean {
 
   return url.protocol === 'https:' && !unsafeHostname;
 }
+
+export function findCardFile(
+  files: KaitenFile[] = [],
+  fileId: string | number,
+): KaitenFile | undefined {
+  const requestedId = String(fileId);
+  return files.find((file) => !file.deleted && (
+    String(file.id) === requestedId ||
+    (file.uid != null && String(file.uid) === requestedId)
+  ));
+}
+
+/**
+ * Returns the file as text when it is valid UTF-8 without NUL bytes, otherwise null.
+ * Content sniffing, not the MIME type: Kaiten leaves mime_type empty for most uploads.
+ */
+export function decodeTextFile(data: Buffer): string | null {
+  if (data.includes(0)) return null;
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(data).replace(/^﻿/, '');
+  } catch {
+    return null;
+  }
+}
+
+/** Keeps a Kaiten file name usable as a single local path segment. */
+export function safeLocalFileName(name: string): string {
+  const cleaned = name
+    .replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g, '_')
+    .replace(/^\.+/, '')
+    .trim();
+  return cleaned.slice(0, 200) || 'file';
+}

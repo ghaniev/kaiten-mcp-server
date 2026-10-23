@@ -63,6 +63,7 @@ KAITEN_CACHE_TTL_SECONDS=300         # Время жизни кеша в сек�
 KAITEN_REQUEST_TIMEOUT_MS=10000      # Таймаут запроса в мс (1-60000)
 KAITEN_MAX_IMAGE_BYTES=8388608       # Максимум 8 МБ на изображение
 KAITEN_MAX_IMAGES_PER_REQUEST=5      # Максимум 5 изображений за вызов
+KAITEN_MAX_FILE_BYTES=26214400       # Максимум 25 МБ на вложение в kaiten_get_card_file
 ```
 
 **Как получить API токен:**
@@ -137,6 +138,7 @@ npm run build
 - `kaiten_get_task_context` - Карточка, все комментарии и скриншоты одним вызовом
 - `kaiten_list_card_attachments` - Список вложений карточки и комментариев
 - `kaiten_get_card_images` - Получить выбранные изображения как MCP image content
+- `kaiten_get_card_file` - Прочитать вложение: текст постранично (`offset`/`max_chars`), картинку как image, остальное сохранить во временную папку и вернуть путь
 
 ### Карточки
 - `kaiten_get_card` - Получить карточку по ID **[format: json/markdown, verbose]**
@@ -742,6 +744,7 @@ enabled_tools = [
   "kaiten_search_cards",
   "kaiten_list_card_attachments",
   "kaiten_get_card_images",
+  "kaiten_get_card_file",
 ]
 default_tools_approval_mode = "prompt"
 ```

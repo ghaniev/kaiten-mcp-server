@@ -75,6 +75,17 @@ const EnvSchema = z.object({
     )
     .describe('Maximum downloaded image size in bytes'),
 
+  KAITEN_MAX_FILE_BYTES: z
+    .string()
+    .optional()
+    .default('26214400')
+    .transform((val) => parseInt(val, 10))
+    .refine(
+      (val) => !isNaN(val) && val >= 1024 && val <= 104857600,
+      'KAITEN_MAX_FILE_BYTES must be between 1024 and 104857600'
+    )
+    .describe('Maximum downloaded attachment size in bytes (kaiten_get_card_file)'),
+
   KAITEN_MAX_IMAGES_PER_REQUEST: z
     .string()
     .optional()
@@ -147,6 +158,7 @@ function loadConfig(): EnvConfig {
     KAITEN_CACHE_TTL_SECONDS: process.env.KAITEN_CACHE_TTL_SECONDS,
     KAITEN_REQUEST_TIMEOUT_MS: process.env.KAITEN_REQUEST_TIMEOUT_MS,
     KAITEN_MAX_IMAGE_BYTES: process.env.KAITEN_MAX_IMAGE_BYTES,
+    KAITEN_MAX_FILE_BYTES: process.env.KAITEN_MAX_FILE_BYTES,
     KAITEN_MAX_IMAGES_PER_REQUEST: process.env.KAITEN_MAX_IMAGES_PER_REQUEST,
     KAITEN_LOG_ENABLED: process.env.KAITEN_LOG_ENABLED,
     KAITEN_LOG_LEVEL: process.env.KAITEN_LOG_LEVEL,
@@ -238,6 +250,7 @@ safeLog.info(`   Max Concurrent Requests: ${config.KAITEN_MAX_CONCURRENT_REQUEST
 safeLog.info(`   Cache TTL: ${config.KAITEN_CACHE_TTL_SECONDS}s`);
 safeLog.info(`   Request Timeout: ${config.KAITEN_REQUEST_TIMEOUT_MS}ms`);
 safeLog.info(`   Max Image Size: ${config.KAITEN_MAX_IMAGE_BYTES} bytes`);
+safeLog.info(`   Max File Size: ${config.KAITEN_MAX_FILE_BYTES} bytes`);
 safeLog.info(`   Max Images Per Request: ${config.KAITEN_MAX_IMAGES_PER_REQUEST}`);
 safeLog.info('✅ Logging configuration:');
 safeLog.info(`   Enabled: ${config.KAITEN_LOG_ENABLED}`);

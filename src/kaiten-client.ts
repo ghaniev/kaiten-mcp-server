@@ -6,8 +6,10 @@ import { config, safeLog } from './config.js';
 import { logger } from './logging/index.js';
 import { setupLoggingMiddleware } from './middleware/logging-middleware.js';
 import {
+  fileSizeInBytes,
   inferImageMimeType,
   isSafeImageDownloadUrl,
+  normalizeMimeType,
   resolveDownloadedImageMimeType,
   validateImageSize,
 } from './attachments.js';
@@ -170,6 +172,12 @@ export interface DownloadedKaitenImage {
   file: KaitenFile;
   data: Buffer;
   mimeType: string;
+}
+
+export interface DownloadedKaitenFile {
+  file: KaitenFile;
+  data: Buffer;
+  contentType: string | null;
 }
 
 export interface KaitenComment {
@@ -674,6 +682,44 @@ export class KaitenClient {
     };
   }
 
+  async downloadCardFile(
+    card: KaitenCard,
+    file: KaitenFile,
+    signal?: AbortSignal,
+  ): Promise<DownloadedKaitenFile> {
+    const maxBytes = config.KAITEN_MAX_FILE_BYTES;
+    const tooLarge = () => new KaitenError(
+      KaitenErrorType.VALIDATION_ERROR,
+      `${file.name} exceeds the ${maxBytes}-byte file limit`,
+      undefined,
+      undefined,
+      'Raise KAITEN_MAX_FILE_BYTES or open the file in Kaiten',
+    );
+    const declaredSize = fileSizeInBytes(file);
+    if (declaredSize !== null && declaredSize > maxBytes) throw tooLarge();
+
+    const downloadUrl = await this.resolveFileDownloadUrl(card, file, signal);
+    this.assertSafeDownloadUrl(downloadUrl);
+
+    const response = await axios.get<ArrayBuffer>(downloadUrl, {
+      responseType: 'arraybuffer',
+      signal,
+      timeout: config.KAITEN_REQUEST_TIMEOUT_MS,
+      maxContentLength: maxBytes,
+      maxBodyLength: maxBytes,
+      maxRedirects: 0,
+    });
+    const data = Buffer.from(response.data);
+    if (data.byteLength > maxBytes) throw tooLarge();
+
+    const contentType = response.headers['content-type'];
+    return {
+      file,
+      data,
+      contentType: normalizeMimeType(contentType == null ? null : String(contentType)),
+    };
+  }
+
   private async resolveFileDownloadUrl(
     card: KaitenCard,
     file: KaitenFile,
@@ -724,7 +770,7 @@ export class KaitenClient {
       })();
       throw new KaitenError(
         KaitenErrorType.VALIDATION_ERROR,
-        `Unsafe image download URL returned for host ${hostname}`,
+        `Unsafe file download URL returned for host ${hostname}`,
       );
     }
   }

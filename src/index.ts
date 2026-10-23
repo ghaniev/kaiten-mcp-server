@@ -14,6 +14,9 @@ import {
   ResourceTemplate,
   Prompt,
 } from '@modelcontextprotocol/sdk/types.js';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { config, safeLog } from './config.js';
 import { cache } from './cache.js';
@@ -104,6 +107,7 @@ import {
   SetLogLevelSchema,
   ListCardAttachmentsSchema,
   GetCardImagesSchema,
+  GetCardFileSchema,
   GetTaskContextSchema,
   ListCardMembersSchema,
   SetCardResponsibleSchema,
@@ -143,7 +147,12 @@ import {
   applyResponseFormat,
 } from './utils.js';
 import {
+  decodeTextFile,
+  findCardFile,
+  inferImageMimeType,
   listCardAttachments,
+  resolveDownloadedImageMimeType,
+  safeLocalFileName,
   selectCardImages,
 } from './attachments.js';
 
@@ -654,6 +663,33 @@ The tool accepts a card ID extracted from a Kaiten URL. It supports PNG, JPEG, W
         limit: { type: 'number', description: 'Maximum images to return' },
       },
       required: ['card_id'],
+    },
+  },
+  {
+    name: 'kaiten_get_card_file',
+    description: `Read one file attached to a Kaiten card or to one of its comments.
+Text files (md, txt, log, json, code...) come back as text, paged with offset/max_chars. Images come back as image content.
+Other files (pdf, zip, video...) are saved to a local temp folder and the tool returns the path, to open with a file-reading tool.
+Get file_id from kaiten_list_card_attachments or kaiten_get_task_context.`,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        card_id: { type: 'number', description: 'Card ID' },
+        file_id: {
+          anyOf: [{ type: 'number' }, { type: 'string' }],
+          description: 'Attachment ID or UID',
+        },
+        offset: { type: 'number', description: 'Character offset for text files (default 0)' },
+        max_chars: { type: 'number', description: 'Maximum characters of text to return (default 50000)' },
+        save_to_disk: { type: 'boolean', description: 'Always save locally and return the path' },
+      },
+      required: ['card_id', 'file_id'],
     },
   },
   {
@@ -3815,6 +3851,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           );
         }
         return { content };
+      }
+
+      case 'kaiten_get_card_file': {
+        const validatedArgs = GetCardFileSchema.parse(args);
+        const card = await kaitenClient.getCard(validatedArgs.card_id, signal);
+        const file = findCardFile(card.files, validatedArgs.file_id);
+        if (!file) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `No attachment ${validatedArgs.file_id} on card ${validatedArgs.card_id}; see kaiten_list_card_attachments`,
+            }],
+            isError: true,
+          };
+        }
+
+        const downloaded = await kaitenClient.downloadCardFile(card, file, signal);
+        const fileLabel = `${file.name} (ID: ${file.uid || file.id}, ${downloaded.data.byteLength} bytes)`;
+
+        if (!validatedArgs.save_to_disk && inferImageMimeType(file)) {
+          return {
+            content: [
+              { type: 'text' as const, text: `Attachment: ${fileLabel}` },
+              {
+                type: 'image' as const,
+                data: downloaded.data.toString('base64'),
+                mimeType: resolveDownloadedImageMimeType(file, downloaded.contentType),
+              },
+            ],
+          };
+        }
+
+        const text = validatedArgs.save_to_disk ? null : decodeTextFile(downloaded.data);
+        if (text !== null) {
+          const start = Math.min(validatedArgs.offset, text.length);
+          const end = Math.min(start + validatedArgs.max_chars, text.length);
+          const range = end < text.length
+            ? `characters ${start}-${end} of ${text.length}; next_offset: ${end}`
+            : `characters ${start}-${end} of ${text.length}, to the end`;
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `Attachment: ${fileLabel}, ${range}\n\n${text.slice(start, end)}`,
+            }],
+          };
+        }
+
+        const dir = join(
+          tmpdir(),
+          'kaiten-mcp-files',
+          String(card.id),
+          safeLocalFileName(String(file.uid || file.id)),
+        );
+        await mkdir(dir, { recursive: true });
+        const localPath = join(dir, safeLocalFileName(file.name));
+        await writeFile(localPath, downloaded.data);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              name: file.name,
+              id: String(file.uid || file.id),
+              size: downloaded.data.byteLength,
+              content_type: downloaded.contentType,
+              saved_to: localPath,
+            }, null, 2),
+          }],
+        };
       }
 
       case 'kaiten_get_task_context': {
