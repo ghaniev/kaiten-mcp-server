@@ -125,6 +125,13 @@ Reference: src/config.ts:126-152 implements the `safeLog` wrapper.
 - Item tools take only `item_id`; the checklist is resolved from the card via `findItemChecklist()`.
 - Items are always projected (`projectChecklist()`): the raw ones embed users with base64 avatars.
 
+**Attachments Pattern (src/attachments.ts, src/local-files.ts):**
+- Files come embedded in `GET /cards/{id}` (`files`); bodies are fetched from the file host by
+  `KaitenClient.fetchCardFile()` (HTTPS only, no private hosts, no redirects, size-capped).
+- `kaiten_get_card_file` saves non-text files through `saveAttachmentLocally()`: a per-uid 0700
+  folder in the temp dir (plain `%TEMP%` folder on Windows), names cleaned by `safeLocalFileName()`
+  for Windows too. Keep both platforms in mind when touching paths.
+
 **Card Operations Pattern (src/card-ops.ts):**
 - The assignee is a card MEMBER with `type: 2`; `owner` is who set the task.
 - `setCardResponsible()` does POST → read back → PATCH, because the API does not honour the

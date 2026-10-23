@@ -5,9 +5,13 @@
 ### Added
 - **Содержимое вложений:** `kaiten_get_card_file` читает файл карточки или комментария по
   ID/UID. Текст (определяется по содержимому: Kaiten обычно не заполняет `mime_type`)
-  возвращается постранично через `offset`/`max_chars`, картинка — как image, остальное
-  (pdf, архивы, видео) сохраняется в `$TMPDIR/kaiten-mcp-files/<card>/<file>/` и
-  возвращается путь. Лимит размера — `KAITEN_MAX_FILE_BYTES` (по умолчанию 25 МБ).
+  возвращается постранично через `offset`/`max_chars` (по умолчанию 20 000 символов,
+  не больше 100 000), картинка в пределах `KAITEN_MAX_IMAGE_BYTES` — как image, остальное
+  (pdf, архивы, видео, большие картинки) сохраняется в
+  `<temp>/kaiten-mcp-files-<uid>/<card>/<file>/` (на Windows — `%TEMP%\kaiten-mcp-files\…`)
+  и возвращается путь. Папка только для владельца (0700, файлы 0600), подложенная
+  символическая ссылка заменяется, а не открывается. Лимит размера —
+  `KAITEN_MAX_FILE_BYTES` (по умолчанию 25 МБ).
 - **Чек-листы.** `kaiten_list_card_checklists`, `kaiten_create_checklist` (сразу с пунктами),
   `kaiten_update_checklist`, `kaiten_delete_checklist`, `kaiten_add_checklist_items`,
   `kaiten_update_checklist_item`, `kaiten_set_checklist_items_checked` (пачкой),
@@ -33,6 +37,9 @@
 - `kaiten_search_cards` принимает `responsible_ids`.
 
 ### Changed
+- Ошибки скачивания вложений (HTTP-ответ хранилища, редирект, превышение лимита) приходят
+  коротким сообщением со статусом вместо тела ответа массивом байтов; `kaiten_get_card_images`
+  и `kaiten_get_card_file` качают файлы одним общим путём.
 - `kaiten_find_cards_by_user(role: responsible)` фильтрует на сервере через `responsible_ids`
   вместо перебора всех карточек участника: на живом API — 15 просмотренных карточек вместо
   постраничного прохода по сотням. Запись от 2026-09-21 ниже («серверного фильтра нет») неверна.

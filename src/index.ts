@@ -14,9 +14,6 @@ import {
   ResourceTemplate,
   Prompt,
 } from '@modelcontextprotocol/sdk/types.js';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { z } from 'zod';
 import { config, safeLog } from './config.js';
 import { cache } from './cache.js';
@@ -152,9 +149,10 @@ import {
   inferImageMimeType,
   listCardAttachments,
   resolveDownloadedImageMimeType,
-  safeLocalFileName,
   selectCardImages,
+  sliceText,
 } from './attachments.js';
+import { saveAttachmentLocally } from './local-files.js';
 
 // Config is loaded and validated in config.ts
 const API_URL = config.KAITEN_API_URL;
@@ -686,7 +684,7 @@ Get file_id from kaiten_list_card_attachments or kaiten_get_task_context.`,
           description: 'Attachment ID or UID',
         },
         offset: { type: 'number', description: 'Character offset for text files (default 0)' },
-        max_chars: { type: 'number', description: 'Maximum characters of text to return (default 50000)' },
+        max_chars: { type: 'number', description: 'Maximum characters of text to return (default 20000, max 100000)' },
         save_to_disk: { type: 'boolean', description: 'Always save locally and return the path' },
       },
       required: ['card_id', 'file_id'],
@@ -3868,54 +3866,67 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const downloaded = await kaitenClient.downloadCardFile(card, file, signal);
-        const fileLabel = `${file.name} (ID: ${file.uid || file.id}, ${downloaded.data.byteLength} bytes)`;
+        const fileKey = String(file.uid || file.id);
+        const fileLabel = `${file.name} (ID: ${fileKey}, ${downloaded.data.byteLength} bytes)`;
 
+        // Inline only what kaiten_get_card_images would accept; a too-big image or one the
+        // host serves with an unsupported type is saved to disk below instead of failing.
+        let imageMimeType: string | null = null;
+        let imageNote: string | undefined;
         if (!validatedArgs.save_to_disk && inferImageMimeType(file)) {
+          if (downloaded.data.byteLength > config.KAITEN_MAX_IMAGE_BYTES) {
+            imageNote = `Image is over KAITEN_MAX_IMAGE_BYTES (${config.KAITEN_MAX_IMAGE_BYTES}), saved instead of shown`;
+          } else {
+            try {
+              imageMimeType = resolveDownloadedImageMimeType(file, downloaded.contentType);
+            } catch (error) {
+              imageNote = `${error instanceof Error ? error.message : String(error)}; saved instead of shown`;
+            }
+          }
+        }
+        if (imageMimeType) {
           return {
             content: [
               { type: 'text' as const, text: `Attachment: ${fileLabel}` },
               {
                 type: 'image' as const,
                 data: downloaded.data.toString('base64'),
-                mimeType: resolveDownloadedImageMimeType(file, downloaded.contentType),
+                mimeType: imageMimeType,
               },
             ],
           };
         }
 
-        const text = validatedArgs.save_to_disk ? null : decodeTextFile(downloaded.data);
+        const text = validatedArgs.save_to_disk || imageNote ? null : decodeTextFile(downloaded.data);
         if (text !== null) {
-          const start = Math.min(validatedArgs.offset, text.length);
-          const end = Math.min(start + validatedArgs.max_chars, text.length);
-          const range = end < text.length
-            ? `characters ${start}-${end} of ${text.length}; next_offset: ${end}`
-            : `characters ${start}-${end} of ${text.length}, to the end`;
+          const page = sliceText(text, validatedArgs.offset, validatedArgs.max_chars);
+          const range = page.end < page.total
+            ? `characters ${page.start}-${page.end} of ${page.total}; next_offset: ${page.end}`
+            : `characters ${page.start}-${page.end} of ${page.total}, to the end`;
           return {
             content: [{
               type: 'text' as const,
-              text: `Attachment: ${fileLabel}, ${range}\n\n${text.slice(start, end)}`,
+              text: `Attachment: ${fileLabel}, ${range}\n\n${page.text}`,
             }],
           };
         }
 
-        const dir = join(
-          tmpdir(),
-          'kaiten-mcp-files',
-          String(card.id),
-          safeLocalFileName(String(file.uid || file.id)),
+        const localPath = await saveAttachmentLocally(
+          card.id,
+          fileKey,
+          file.name,
+          downloaded.data,
         );
-        await mkdir(dir, { recursive: true });
-        const localPath = join(dir, safeLocalFileName(file.name));
-        await writeFile(localPath, downloaded.data);
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               name: file.name,
-              id: String(file.uid || file.id),
+              id: fileKey,
               size: downloaded.data.byteLength,
               content_type: downloaded.contentType,
               saved_to: localPath,
+              ...(imageNote ? { note: imageNote } : {}),
             }, null, 2),
           }],
         };

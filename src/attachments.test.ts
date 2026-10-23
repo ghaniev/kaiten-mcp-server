@@ -9,8 +9,9 @@ import {
   listCardAttachments,
   resolveDownloadedImageMimeType,
   safeLocalFileName,
+  sliceText,
   selectCardImages,
-  validateImageSize,
+  validateFileSize,
 } from './attachments.js';
 
 const files: KaitenFile[] = [
@@ -91,14 +92,18 @@ test('infers supported MIME types and rejects non-image responses', () => {
 });
 
 test('enforces declared and downloaded image size limits', () => {
-  assert.doesNotThrow(() => validateImageSize(files[0], 1024, 2048));
+  assert.doesNotThrow(() => validateFileSize(files[0], 1024, 2048));
   assert.throws(
-    () => validateImageSize(files[1], 1, 1024),
+    () => validateFileSize(files[1], 1, 1024),
     /exceeds the 1024-byte image limit/,
   );
   assert.throws(
-    () => validateImageSize(files[0], 4096, 2048),
+    () => validateFileSize(files[0], 4096, 2048),
     /exceeds the 2048-byte image limit/,
+  );
+  assert.throws(
+    () => validateFileSize(files[0], 4096, 2048, 'file'),
+    /exceeds the 2048-byte file limit/,
   );
 });
 
@@ -130,4 +135,27 @@ test('turns a file name into one safe local path segment', () => {
   assert.equal(safeLocalFileName('../../etc/passwd'), '_.._etc_passwd');
   assert.equal(safeLocalFileName('a\\b:c.txt'), 'a_b_c.txt');
   assert.equal(safeLocalFileName('...'), 'file');
+  assert.equal(safeLocalFileName(' ..'), 'file');
+  assert.equal(safeLocalFileName(' .bashrc'), 'bashrc');
+});
+
+test('keeps file names valid on Windows', () => {
+  assert.equal(safeLocalFileName('CON.txt'), '_CON.txt');
+  assert.equal(safeLocalFileName('nul'), '_nul');
+  assert.equal(safeLocalFileName('console.log'), 'console.log');
+  assert.equal(safeLocalFileName('report. . '), 'report');
+  const long = safeLocalFileName(`${'я'.repeat(300)}.pdf`);
+  assert.equal(Array.from(long).length, 120);
+  assert.ok(long.endsWith('я.pdf'));
+});
+
+test('pages text by offsets without splitting surrogate pairs', () => {
+  assert.deepEqual(sliceText('abcdef', 2, 3), { text: 'cde', start: 2, end: 5, total: 6 });
+  assert.deepEqual(sliceText('abc', 10, 5), { text: '', start: 3, end: 3, total: 3 });
+  const emoji = 'a😀b';
+  const first = sliceText(emoji, 0, 2);
+  assert.equal(first.text, 'a');
+  const second = sliceText(emoji, first.end, 2);
+  assert.equal(second.text, '😀');
+  assert.equal(sliceText(emoji, 2, 5).text, '😀b');
 });

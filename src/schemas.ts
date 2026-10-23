@@ -77,7 +77,7 @@ export const GetCardFileSchema = z.object({
     .describe('Attachment ID or UID from kaiten_list_card_attachments'),
   offset: z.number().int().min(0).optional().default(0)
     .describe('Character offset to start reading a text file from'),
-  max_chars: z.number().positive().int().max(200000).optional().default(50000)
+  max_chars: z.number().positive().int().max(100000).optional().default(20000)
     .describe('Maximum characters of a text file to return'),
   save_to_disk: z.boolean().optional().default(false)
     .describe('Save the file locally and return its path even when it is text'),

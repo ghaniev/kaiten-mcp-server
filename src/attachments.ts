@@ -85,17 +85,18 @@ export function selectCardImages(
     .slice(0, limit);
 }
 
-export function validateImageSize(
+export function validateFileSize(
   file: KaitenFile,
   actualSize: number,
   maxBytes: number,
+  limitKind: 'image' | 'file' = 'image',
 ): void {
   const declaredSize = fileSizeInBytes(file);
-  if (declaredSize !== null && declaredSize > maxBytes) {
-    throw new Error(`${file.name} exceeds the ${maxBytes}-byte image limit`);
-  }
-  if (actualSize > maxBytes) {
-    throw new Error(`${file.name} exceeds the ${maxBytes}-byte image limit`);
+  if (
+    (declaredSize !== null && declaredSize > maxBytes) ||
+    actualSize > maxBytes
+  ) {
+    throw new Error(`${file.name} exceeds the ${maxBytes}-byte ${limitKind} limit`);
   }
 }
 
@@ -165,11 +166,56 @@ export function decodeTextFile(data: Buffer): string | null {
   }
 }
 
-/** Keeps a Kaiten file name usable as a single local path segment. */
-export function safeLocalFileName(name: string): string {
-  const cleaned = name
-    .replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g, '_')
-    .replace(/^\.+/, '')
-    .trim();
-  return cleaned.slice(0, 200) || 'file';
+// Names Windows refuses as a file, whatever the extension (con.txt is as bad as con)
+const windowsReservedNames = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])$/i;
+
+/**
+ * Keeps a Kaiten file name usable as a single local path segment on Linux, macOS and Windows:
+ * no separators or characters Windows rejects, no leading dots (hidden files, `..`), no trailing
+ * dots or spaces (Windows drops them), no reserved device names, and short enough that the
+ * whole temp path stays under the Windows 260-character limit.
+ */
+export function safeLocalFileName(name: string, maxLength = 120): string {
+  const trimEdges = (value: string) => value.trim().replace(/^[.\s]+/, '').replace(/[.\s]+$/, '');
+  let cleaned = trimEdges(name.replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g, '_'));
+  if (!cleaned) return 'file';
+  if (windowsReservedNames.test(cleaned.split('.')[0].trim())) cleaned = `_${cleaned}`;
+
+  const chars = Array.from(cleaned);
+  if (chars.length <= maxLength) return cleaned;
+  const dot = cleaned.lastIndexOf('.');
+  const extension = dot > 0 && cleaned.length - dot <= 16 ? cleaned.slice(dot) : '';
+  const stem = Array.from(extension ? cleaned.slice(0, dot) : cleaned)
+    .slice(0, maxLength - extension.length)
+    .join('');
+  return trimEdges(stem) + extension;
+}
+
+export interface TextSlice {
+  text: string;
+  start: number;
+  end: number;
+  total: number;
+}
+
+/**
+ * Cuts a page out of a text file by UTF-16 offsets (what next_offset reports) without
+ * splitting a surrogate pair, so an emoji on the boundary moves whole to the next page.
+ */
+export function sliceText(text: string, offset: number, maxChars: number): TextSlice {
+  const isHighSurrogate = (i: number) => {
+    const code = text.charCodeAt(i);
+    return code >= 0xd800 && code <= 0xdbff;
+  };
+  const isLowSurrogate = (i: number) => {
+    const code = text.charCodeAt(i);
+    return code >= 0xdc00 && code <= 0xdfff;
+  };
+
+  let start = Math.min(offset, text.length);
+  if (start > 0 && isLowSurrogate(start) && isHighSurrogate(start - 1)) start--;
+  let end = Math.min(start + maxChars, text.length);
+  if (end > start + 1 && isHighSurrogate(end - 1) && isLowSurrogate(end)) end--;
+
+  return { text: text.slice(start, end), start, end, total: text.length };
 }
