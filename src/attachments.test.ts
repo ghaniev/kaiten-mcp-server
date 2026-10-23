@@ -124,10 +124,16 @@ test('finds a card file by numeric ID or UID and skips deleted files', () => {
   assert.equal(findCardFile(files, 99), undefined);
 });
 
-test('decodes UTF-8 text and rejects binary content', () => {
+test('decodes UTF-8 and BOM-marked UTF-16 text and rejects binary content', () => {
   assert.equal(decodeTextFile(Buffer.from('\uFEFF# План\n')), '# План\n');
   assert.equal(decodeTextFile(Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x01])), null);
   assert.equal(decodeTextFile(Buffer.from([0xff, 0xfe, 0x41])), null);
+  assert.equal(decodeTextFile(Buffer.from('\uFEFFлог\r\n', 'utf16le')), 'лог\r\n');
+  assert.equal(
+    decodeTextFile(Buffer.from('\uFEFFok', 'utf16le').swap16()),
+    'ok',
+  );
+  assert.equal(decodeTextFile(Buffer.from('\uFEFFa\0b', 'utf16le')), null);
 });
 
 test('turns a file name into one safe local path segment', () => {
@@ -142,11 +148,16 @@ test('turns a file name into one safe local path segment', () => {
 test('keeps file names valid on Windows', () => {
   assert.equal(safeLocalFileName('CON.txt'), '_CON.txt');
   assert.equal(safeLocalFileName('nul'), '_nul');
+  assert.equal(safeLocalFileName('CONOUT$'), '_CONOUT$');
   assert.equal(safeLocalFileName('console.log'), 'console.log');
   assert.equal(safeLocalFileName('report. . '), 'report');
   const long = safeLocalFileName(`${'я'.repeat(300)}.pdf`);
-  assert.equal(Array.from(long).length, 120);
+  assert.equal(long.length, 120);
   assert.ok(long.endsWith('я.pdf'));
+  // Windows counts UTF-16 units: an emoji is two, and a pair is never cut in half
+  const emoji = safeLocalFileName(`${'😀'.repeat(130)}.txt`);
+  assert.equal(emoji, `${'😀'.repeat(58)}.txt`);
+  assert.equal(safeLocalFileName('0123456789'.repeat(5), 40), '0123456789'.repeat(4));
 });
 
 test('pages text by offsets without splitting surrogate pairs', () => {
@@ -158,4 +169,8 @@ test('pages text by offsets without splitting surrogate pairs', () => {
   const second = sliceText(emoji, first.end, 2);
   assert.equal(second.text, '😀');
   assert.equal(sliceText(emoji, 2, 5).text, '😀b');
+  // A one-unit page takes the whole pair instead of standing still
+  const one = sliceText(emoji, 1, 1);
+  assert.deepEqual(one, { text: '😀', start: 1, end: 3, total: 4 });
+  assert.equal(sliceText(emoji, one.end, 1).text, 'b');
 });

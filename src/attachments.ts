@@ -154,26 +154,32 @@ export function findCardFile(
 }
 
 /**
- * Returns the file as text when it is valid UTF-8 without NUL bytes, otherwise null.
+ * Returns the file as text when it is valid UTF-8, or UTF-16 with a BOM (what PowerShell and
+ * Notepad on Windows often write), and holds no NUL characters; otherwise null.
  * Content sniffing, not the MIME type: Kaiten leaves mime_type empty for most uploads.
+ * TextDecoder drops the BOM itself.
  */
 export function decodeTextFile(data: Buffer): string | null {
-  if (data.includes(0)) return null;
+  const encoding = data[0] === 0xff && data[1] === 0xfe ? 'utf-16le'
+    : data[0] === 0xfe && data[1] === 0xff ? 'utf-16be'
+    : 'utf-8';
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(data).replace(/^﻿/, '');
+    const text = new TextDecoder(encoding, { fatal: true }).decode(data);
+    return text.includes('\0') ? null : text;
   } catch {
     return null;
   }
 }
 
 // Names Windows refuses as a file, whatever the extension (con.txt is as bad as con)
-const windowsReservedNames = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])$/i;
+const windowsReservedNames = /^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])$/i;
 
 /**
  * Keeps a Kaiten file name usable as a single local path segment on Linux, macOS and Windows:
  * no separators or characters Windows rejects, no leading dots (hidden files, `..`), no trailing
  * dots or spaces (Windows drops them), no reserved device names, and short enough that the
- * whole temp path stays under the Windows 260-character limit.
+ * whole temp path stays under the Windows 260-character limit. Length is counted in UTF-16
+ * units, as Windows counts it, and never cuts a surrogate pair.
  */
 export function safeLocalFileName(name: string, maxLength = 120): string {
   const trimEdges = (value: string) => value.trim().replace(/^[.\s]+/, '').replace(/[.\s]+$/, '');
@@ -181,14 +187,15 @@ export function safeLocalFileName(name: string, maxLength = 120): string {
   if (!cleaned) return 'file';
   if (windowsReservedNames.test(cleaned.split('.')[0].trim())) cleaned = `_${cleaned}`;
 
-  const chars = Array.from(cleaned);
-  if (chars.length <= maxLength) return cleaned;
+  if (cleaned.length <= maxLength) return cleaned;
   const dot = cleaned.lastIndexOf('.');
   const extension = dot > 0 && cleaned.length - dot <= 16 ? cleaned.slice(dot) : '';
-  const stem = Array.from(extension ? cleaned.slice(0, dot) : cleaned)
-    .slice(0, maxLength - extension.length)
-    .join('');
-  return trimEdges(stem) + extension;
+  let stem = '';
+  for (const char of extension ? cleaned.slice(0, dot) : cleaned) {
+    if (stem.length + char.length > maxLength - extension.length) break;
+    stem += char;
+  }
+  return (trimEdges(stem) || 'file') + extension;
 }
 
 export interface TextSlice {
@@ -200,7 +207,8 @@ export interface TextSlice {
 
 /**
  * Cuts a page out of a text file by UTF-16 offsets (what next_offset reports) without
- * splitting a surrogate pair, so an emoji on the boundary moves whole to the next page.
+ * splitting a surrogate pair, so an emoji on the boundary moves whole to the next page
+ * (or, for max_chars 1, comes whole on this one).
  */
 export function sliceText(text: string, offset: number, maxChars: number): TextSlice {
   const isHighSurrogate = (i: number) => {
@@ -215,7 +223,11 @@ export function sliceText(text: string, offset: number, maxChars: number): TextS
   let start = Math.min(offset, text.length);
   if (start > 0 && isLowSurrogate(start) && isHighSurrogate(start - 1)) start--;
   let end = Math.min(start + maxChars, text.length);
-  if (end > start + 1 && isHighSurrogate(end - 1) && isLowSurrogate(end)) end--;
+  if (end < text.length && isHighSurrogate(end - 1) && isLowSurrogate(end)) {
+    // Shrink to keep the pair whole for the next page; with a one-unit page that would
+    // return nothing and never advance, so take the whole pair instead
+    end += end - 1 > start ? -1 : 1;
+  }
 
   return { text: text.slice(start, end), start, end, total: text.length };
 }
