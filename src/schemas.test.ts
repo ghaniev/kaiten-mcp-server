@@ -32,11 +32,15 @@ test('a column alone is still a plain move inside one board', () => {
   assert.equal(result.success, true);
 });
 
-test('owner cannot be cleared: the API requires an integer', () => {
-  // Kaiten: "Card.owner_id should be integer". Reassigning is the only option,
-  // so null must not look like a supported way to unassign.
-  const result = UpdateCardSchema.safeParse({ card_id: 1, owner_id: null });
-  assert.equal(result.success, false);
+test('the заказчик cannot be set or changed through MCP', () => {
+  // The owner is always whoever creates the card; any owner_id is refused,
+  // so nobody can put another person down as the заказчик.
+  for (const owner_id of [5, null]) {
+    assert.equal(CreateCardSchema.safeParse({ title: 'x', board_id: 1, owner_id }).success, false);
+    assert.equal(UpdateCardSchema.safeParse({ card_id: 1, owner_id }).success, false);
+  }
+  const refused = UpdateCardSchema.safeParse({ card_id: 1, owner_id: 5 });
+  assert.match(refused.error!.issues[0].message, /responsible/);
 });
 
 test('subtask link needs both ends and rejects stray keys', () => {
@@ -54,11 +58,9 @@ test('subtask ids must be positive integers', () => {
   assert.equal(AddCardChildSchema.safeParse({ card_id: 1, child_id: 1.5 }).success, false);
 });
 
-test('a due date can be cleared with null, unlike an owner', () => {
-  // The API accepts due_date: null and rejects owner_id: null.
+test('a due date can be cleared with null', () => {
   assert.equal(UpdateCardSchema.safeParse({ card_id: 1, due_date: null }).success, true);
   assert.equal(UpdateCardSchema.safeParse({ card_id: 1, due_date: '2026-10-01T12:00:00Z' }).success, true);
-  assert.equal(UpdateCardSchema.safeParse({ card_id: 1, owner_id: null }).success, false);
 });
 
 test('estimates are accepted as size_text, the field Kaiten actually stores', () => {
@@ -68,7 +70,7 @@ test('estimates are accepted as size_text, the field Kaiten actually stores', ()
 
 test('a card can be created with an assignee, which is a member and not the owner', () => {
   const parsed = CreateCardSchema.safeParse({
-    title: 'x', board_id: 1, owner_id: 5, responsible_id: 7, member_ids: [8, 9],
+    title: 'x', board_id: 1, responsible_id: 7, member_ids: [8, 9],
   });
   assert.equal(parsed.success, true);
   assert.equal(parsed.data!.responsible_id, 7);

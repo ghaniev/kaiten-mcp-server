@@ -507,6 +507,7 @@ Card Operations:
 
 ASSIGNEE vs OWNER (the one thing to get right):
 • The assignee is a card MEMBER with type 2 ("responsible"). owner_id is who SET the task.
+• The owner ("заказчик") is always the card's creator. Setting or changing owner_id through MCP is disabled.
 • Assign with kaiten_set_card_responsible, read with kaiten_list_card_members, search with kaiten_find_cards_by_user.
 • A card holds at most one responsible; assigning a new one demotes the previous.
 
@@ -680,7 +681,7 @@ Prefer this read-only tool when the user gives a Kaiten task URL or ID and asks 
     name: 'kaiten_create_card',
     description: `Create a new card on a Kaiten board with specified properties. Supports idempotency for safe retries.
 
-PURPOSE: Create new task cards with title, description, owner, due date, and board placement. Use after discovering board structure via kaiten_list_boards, kaiten_list_columns, kaiten_list_lanes, and kaiten_list_types to get valid IDs.
+PURPOSE: Create new task cards with title, description, assignee, due date, and board placement. Use after discovering board structure via kaiten_list_boards, kaiten_list_columns, kaiten_list_lanes, and kaiten_list_types to get valid IDs.
 
 REQUIRED PARAMETERS:
 - title (required): Card title, 1-500 characters.
@@ -697,7 +698,7 @@ OPTIONAL PARAMETERS:
 - asap (optional): Mark as urgent/ASAP. Boolean true/false.
 - responsible_id (optional): The ASSIGNEE ("исполнитель", "поставь на X", "задача для X"). Get user_id from kaiten_list_users(query="name").
 - member_ids (optional): Ordinary participants.
-- owner_id (optional): The CUSTOMER ("заказчик") = who set the task. Leave it OUT: Kaiten makes the token's user (whoever is creating the card) the owner. Pass it only when the user explicitly names a different заказчик. NEVER put the assignee here.
+- Заказчик (owner) is always the creator, i.e. the token's user. It cannot be set through MCP: owner_id is rejected.
 - due_date (optional): Due date in ISO 8601 format. Example: "2025-11-01T23:59:59Z"
 - idempotency_key (optional): Unique key for safe retries. Auto-generated if omitted. Format: UUID or timestamp string.
 
@@ -730,7 +731,7 @@ USAGE EXAMPLES:
   }
 
 ✅ DO: Use idempotency_key for retry safety if making same request multiple times
-❌ DON'T: Pass the assignee as owner_id - that makes them the заказчик instead of the creator
+❌ DON'T: Pass owner_id - it is rejected; the заказчик is always the creator
 ❌ DON'T: Create card without checking board exists first - will fail with 404
 ❌ DON'T: Use invalid column_id/lane_id from different board - causes validation error
 ❌ DON'T: Assign to non-existent user - verify user_id with kaiten_list_users first
@@ -739,7 +740,7 @@ USAGE EXAMPLES:
 ERRORS:
 - VALIDATION_ERROR (422): Invalid parameters. Common causes:
   - column_id/lane_id/type_id don't exist on this board
-  - owner_id doesn't exist or user is deactivated
+  - responsible_id doesn't exist or user is deactivated
   - title exceeds 500 characters
   - due_date format invalid (must be ISO 8601)
   Solution: Verify all IDs with kaiten_list_* tools first
@@ -826,10 +827,6 @@ RELATED TOOLS:
           items: { type: 'number' },
           description: 'Ordinary participants',
         },
-        owner_id: {
-          type: 'number',
-          description: 'Заказчик (who set the task). Omit: defaults to the creator. Never the assignee',
-        },
         due_date: {
           type: 'string',
           description: 'Due date (ISO format)',
@@ -862,7 +859,7 @@ OPTIONAL PARAMETERS (at least one required):
 - type_id (optional): Change card type. Get from kaiten_list_types(board_id).
 - size (optional): Update estimate/story points. Non-negative number.
 - asap (optional): Mark/unmark as urgent. Boolean true/false.
-- owner_id (optional): Change the CUSTOMER ("заказчик", who set the task) - only when explicitly asked. Cannot be cleared (the API rejects null). To change the ASSIGNEE use kaiten_set_card_responsible, not this.
+- Заказчик (owner) cannot be changed through MCP: owner_id is rejected. To change the ASSIGNEE use kaiten_set_card_responsible.
 - due_date (optional): Set/update due date. ISO 8601 format: "2025-11-01T23:59:59Z". Pass empty string "" to clear.
 - idempotency_key (optional): Unique key for safe retries. Auto-generated if omitted.
 
@@ -891,7 +888,7 @@ USAGE EXAMPLES:
   2. kaiten_set_card_responsible({card_id: 12345, user_id: <user_id>})
 
 ✅ DO: Clear due date: {card_id: 12345, due_date: null}
-❌ DON'T: Reassign via owner_id - that replaces the заказчик, the assignee stays the same
+❌ DON'T: Pass owner_id - changing the заказчик through MCP is disabled
 
 ❌ DON'T: Update without checking current state - may overwrite important changes
 ❌ DON'T: Move card to column from different board - validation error
@@ -903,7 +900,7 @@ PARTIAL UPDATES:
 - Only specified fields are modified
 - Omitted fields remain unchanged
 - Example: {card_id: 12345, title: "New"} only changes title, everything else stays same
-- To clear optional fields: empty string "" for description, null for due_date. owner_id cannot be cleared
+- To clear optional fields: empty string "" for description, null for due_date
 
 ERRORS:
 - NOT_FOUND (404): Card doesn't exist or is deleted
@@ -911,7 +908,6 @@ ERRORS:
 
 - VALIDATION_ERROR (422): Invalid parameter values. Common causes:
   - column_id/lane_id/type_id don't belong to card's board
-  - owner_id doesn't exist
   - state not 1, 2, or 3
   - title too long (>500 chars)
   - due_date format invalid
@@ -1012,10 +1008,6 @@ RELATED TOOLS:
         asap: {
           type: 'boolean',
           description: 'Mark as urgent',
-        },
-        owner_id: {
-          type: 'number',
-          description: 'New заказчик (who set the task). Not the assignee - use kaiten_set_card_responsible',
         },
         due_date: {
           type: 'string',
@@ -1304,7 +1296,7 @@ USAGE EXAMPLES:
 
 ❌ DON'T: Post empty or whitespace-only comments - validation error
 ❌ DON'T: Include sensitive data (passwords, tokens) - comments are visible to all
-❌ DON'T: Use for status updates - update card fields instead (state, owner_id, etc.)
+❌ DON'T: Use for status updates - update card fields instead (state, column_id, etc.)
 ❌ DON'T: Spam with duplicate comments - check existing thread first with kaiten_get_card_comments
 
 ERRORS:
@@ -2739,7 +2731,7 @@ WORKFLOW EXAMPLE:
 
 RELATED TOOLS:
 - kaiten_get_current_user: Get authenticated user info (no search needed)
-- kaiten_create_card: Assignee via responsible_id; owner_id is the заказчик and defaults to the creator
+- kaiten_create_card: Assignee via responsible_id; the заказчик is always the creator
 - kaiten_set_card_responsible: Change the assignee of an existing card
 - kaiten_find_cards_by_user: Cards a person is responsible for / owns`,
     inputSchema: {
@@ -3880,7 +3872,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (validatedArgs.type_id) params.type_id = validatedArgs.type_id;
         if (validatedArgs.size_text !== undefined) params.size_text = validatedArgs.size_text;
         if (validatedArgs.asap !== undefined) params.asap = validatedArgs.asap;
-        if (validatedArgs.owner_id) params.owner_id = validatedArgs.owner_id;
         if (validatedArgs.due_date) params.due_date = validatedArgs.due_date;
         // Without this the client generates a fresh key every time and a retry
         // creates a second card — which is what the parameter exists to prevent.
@@ -3942,7 +3933,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (validatedArgs.size_text !== undefined) params.size_text = validatedArgs.size_text;
         if (validatedArgs.sort_order !== undefined) params.sort_order = validatedArgs.sort_order;
         if (validatedArgs.asap !== undefined) params.asap = validatedArgs.asap;
-        if (validatedArgs.owner_id) params.owner_id = validatedArgs.owner_id;
         // null is meaningful here: it clears the due date.
         if (validatedArgs.due_date !== undefined) params.due_date = validatedArgs.due_date;
         if (validatedArgs.idempotency_key) params.idempotency_key = validatedArgs.idempotency_key;

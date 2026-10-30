@@ -19,6 +19,13 @@ export const VerbosityEnum = z.enum(['minimal', 'normal', 'detailed'])
     'ask a per-card tool with verbose: true when a rare field is needed)'
   );
 
+// The заказчик (owner) is always whoever creates the card — the token's user.
+// Changing it through MCP is disabled on purpose, so a caller cannot put
+// someone else's name on a task they set themselves.
+const OwnerLocked = z
+  .never({ message: 'owner_id (заказчик) cannot be set through MCP: the creator is always the заказчик. To give the task to someone, use responsible_id / kaiten_set_card_responsible.' })
+  .optional();
+
 export const VerboseFlag = z.boolean().optional().default(false).describe(
   'Return the full Kaiten object instead of the compact projection. Avatars are stripped in both modes. ' +
   'A full card is 8-77 KB, a projected one is under 1 KB — leave this off unless a rare field is really needed.'
@@ -96,7 +103,7 @@ export const CreateCardSchema = z.object({
     .optional()
     .describe('The estimate, and the only one Kaiten stores. Format "<number> <unit>", e.g. "8 ч" or "3 д"; it backfills size and size_unit.'),
   asap: z.boolean().optional().describe('Mark as ASAP (optional)'),
-  owner_id: z.number().positive().int().optional().describe('Card owner = who set the task (optional). NOT the assignee — see responsible_id.'),
+  owner_id: OwnerLocked,
   responsible_id: z
     .number()
     .positive()
@@ -148,19 +155,12 @@ export const UpdateCardSchema = z.object({
     .optional()
     .describe('Raw position inside the column (ascending). Prefer kaiten_set_card_order, which computes this from neighbours.'),
   asap: z.boolean().optional().describe('Mark as ASAP (optional)'),
-  owner_id: z
-    .number()
-    .positive()
-    .int()
-    .optional()
-    .describe(
-      'The new owner ID (optional). A card cannot be left without an owner: the API rejects null with "Card.owner_id should be integer", so reassign instead of unassigning.'
-    ),
+  owner_id: OwnerLocked,
   due_date: z
     .string()
     .nullable()
     .optional()
-    .describe('New due date in ISO format, or null to clear it (the API accepts null here, unlike owner_id)'),
+    .describe('New due date in ISO format, or null to clear it'),
   idempotency_key: IdempotencyKeySchema,
   verbose: VerboseFlag,
 })
