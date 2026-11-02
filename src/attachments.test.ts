@@ -2,12 +2,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { KaitenFile } from './kaiten-client.js';
 import {
+  decodeTextFile,
+  findCardFile,
   inferImageMimeType,
   isSafeImageDownloadUrl,
   listCardAttachments,
   resolveDownloadedImageMimeType,
+  safeLocalFileName,
+  sliceText,
   selectCardImages,
-  validateImageSize,
+  validateFileSize,
 } from './attachments.js';
 
 const files: KaitenFile[] = [
@@ -88,14 +92,18 @@ test('infers supported MIME types and rejects non-image responses', () => {
 });
 
 test('enforces declared and downloaded image size limits', () => {
-  assert.doesNotThrow(() => validateImageSize(files[0], 1024, 2048));
+  assert.doesNotThrow(() => validateFileSize(files[0], 1024, 2048));
   assert.throws(
-    () => validateImageSize(files[1], 1, 1024),
+    () => validateFileSize(files[1], 1, 1024),
     /exceeds the 1024-byte image limit/,
   );
   assert.throws(
-    () => validateImageSize(files[0], 4096, 2048),
+    () => validateFileSize(files[0], 4096, 2048),
     /exceeds the 2048-byte image limit/,
+  );
+  assert.throws(
+    () => validateFileSize(files[0], 4096, 2048, 'file'),
+    /exceeds the 2048-byte file limit/,
   );
 });
 
@@ -106,4 +114,63 @@ test('allows HTTPS file hosts and rejects local or private-network URLs', () => 
   assert.equal(isSafeImageDownloadUrl('https://127.0.0.1/a.png'), false);
   assert.equal(isSafeImageDownloadUrl('https://192.168.1.2/a.png'), false);
   assert.equal(isSafeImageDownloadUrl('not-a-url'), false);
+});
+
+test('finds a card file by numeric ID or UID and skips deleted files', () => {
+  assert.equal(findCardFile(files, 1)?.name, 'screen.png');
+  assert.equal(findCardFile(files, '3')?.name, 'requirements.pdf');
+  assert.equal(findCardFile(files, 'comment-image')?.name, 'feedback.JPG');
+  assert.equal(findCardFile(files, 4), undefined);
+  assert.equal(findCardFile(files, 99), undefined);
+});
+
+test('decodes UTF-8 and BOM-marked UTF-16 text and rejects binary content', () => {
+  assert.equal(decodeTextFile(Buffer.from('\uFEFF# План\n')), '# План\n');
+  assert.equal(decodeTextFile(Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x01])), null);
+  assert.equal(decodeTextFile(Buffer.from([0xff, 0xfe, 0x41])), null);
+  assert.equal(decodeTextFile(Buffer.from('\uFEFFлог\r\n', 'utf16le')), 'лог\r\n');
+  assert.equal(
+    decodeTextFile(Buffer.from('\uFEFFok', 'utf16le').swap16()),
+    'ok',
+  );
+  assert.equal(decodeTextFile(Buffer.from('\uFEFFa\0b', 'utf16le')), null);
+});
+
+test('turns a file name into one safe local path segment', () => {
+  assert.equal(safeLocalFileName('ПЛАН-proto-migration.md'), 'ПЛАН-proto-migration.md');
+  assert.equal(safeLocalFileName('../../etc/passwd'), '_.._etc_passwd');
+  assert.equal(safeLocalFileName('a\\b:c.txt'), 'a_b_c.txt');
+  assert.equal(safeLocalFileName('...'), 'file');
+  assert.equal(safeLocalFileName(' ..'), 'file');
+  assert.equal(safeLocalFileName(' .bashrc'), 'bashrc');
+});
+
+test('keeps file names valid on Windows', () => {
+  assert.equal(safeLocalFileName('CON.txt'), '_CON.txt');
+  assert.equal(safeLocalFileName('nul'), '_nul');
+  assert.equal(safeLocalFileName('CONOUT$'), '_CONOUT$');
+  assert.equal(safeLocalFileName('console.log'), 'console.log');
+  assert.equal(safeLocalFileName('report. . '), 'report');
+  const long = safeLocalFileName(`${'я'.repeat(300)}.pdf`);
+  assert.equal(long.length, 120);
+  assert.ok(long.endsWith('я.pdf'));
+  // Windows counts UTF-16 units: an emoji is two, and a pair is never cut in half
+  const emoji = safeLocalFileName(`${'😀'.repeat(130)}.txt`);
+  assert.equal(emoji, `${'😀'.repeat(58)}.txt`);
+  assert.equal(safeLocalFileName('0123456789'.repeat(5), 40), '0123456789'.repeat(4));
+});
+
+test('pages text by offsets without splitting surrogate pairs', () => {
+  assert.deepEqual(sliceText('abcdef', 2, 3), { text: 'cde', start: 2, end: 5, total: 6 });
+  assert.deepEqual(sliceText('abc', 10, 5), { text: '', start: 3, end: 3, total: 3 });
+  const emoji = 'a😀b';
+  const first = sliceText(emoji, 0, 2);
+  assert.equal(first.text, 'a');
+  const second = sliceText(emoji, first.end, 2);
+  assert.equal(second.text, '😀');
+  assert.equal(sliceText(emoji, 2, 5).text, '😀b');
+  // A one-unit page takes the whole pair instead of standing still
+  const one = sliceText(emoji, 1, 1);
+  assert.deepEqual(one, { text: '😀', start: 1, end: 3, total: 4 });
+  assert.equal(sliceText(emoji, one.end, 1).text, 'b');
 });

@@ -78,6 +78,18 @@ export const GetCardImagesSchema = z.object({
     .describe('Maximum number of images to return'),
 }).strict();
 
+export const GetCardFileSchema = z.object({
+  card_id: z.number().positive().int().describe('The card ID'),
+  file_id: AttachmentFileIdSchema
+    .describe('Attachment ID or UID from kaiten_list_card_attachments'),
+  offset: z.number().int().min(0).optional().default(0)
+    .describe('Character offset to start reading a text file from'),
+  max_chars: z.number().positive().int().max(100000).optional().default(20000)
+    .describe('Maximum characters of a text file to return'),
+  save_to_disk: z.boolean().optional().default(false)
+    .describe('Save the file locally and return its path even when it is text'),
+}).strict();
+
 export const GetTaskContextSchema = z.object({
   card_id: z.number().positive().int().describe('The task card ID'),
   include_images: z.boolean().optional().default(true)
@@ -641,6 +653,7 @@ export const SetLogLevelSchema = z.object({
 export type GetCardArgs = z.infer<typeof GetCardSchema>;
 export type ListCardAttachmentsArgs = z.infer<typeof ListCardAttachmentsSchema>;
 export type GetCardImagesArgs = z.infer<typeof GetCardImagesSchema>;
+export type GetCardFileArgs = z.infer<typeof GetCardFileSchema>;
 export type GetTaskContextArgs = z.infer<typeof GetTaskContextSchema>;
 export type CreateCardArgs = z.infer<typeof CreateCardSchema>;
 export type UpdateCardArgs = z.infer<typeof UpdateCardSchema>;
