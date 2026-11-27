@@ -209,7 +209,6 @@ export interface CreateCardParams {
   /** The only estimate field Kaiten stores, e.g. "8 ч". */
   size_text?: string;
   asap?: boolean;
-  owner_id?: number;
   due_date?: string | null;
   sort_order?: number;
   custom_fields?: Record<string, any>;
@@ -229,7 +228,6 @@ export interface UpdateCardParams {
   /** The only estimate field Kaiten stores, e.g. "8 ч". */
   size_text?: string;
   asap?: boolean;
-  owner_id?: number;
   /** null clears the due date; the API accepts it. */
   due_date?: string | null;
   sort_order?: number;
