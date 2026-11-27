@@ -160,6 +160,8 @@ export function findCardFile(
  * TextDecoder drops the BOM itself.
  */
 export function decodeTextFile(data: Buffer): string | null {
+  // PDF can contain only ASCII bytes and still needs a file reader.
+  if (data.subarray(0, 5).toString('latin1') === '%PDF-') return null;
   const encoding = data[0] === 0xff && data[1] === 0xfe ? 'utf-16le'
     : data[0] === 0xfe && data[1] === 0xff ? 'utf-16be'
     : 'utf-8';
@@ -179,7 +181,8 @@ const windowsReservedNames = /^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|
  * no separators or characters Windows rejects, no leading dots (hidden files, `..`), no trailing
  * dots or spaces (Windows drops them), no reserved device names, and short enough that the
  * whole temp path stays under the Windows 260-character limit. Length is counted in UTF-16
- * units, as Windows counts it, and never cuts a surrogate pair.
+ * units, as Windows counts it, and never cuts a surrogate pair. Linux names also stay
+ * within 255 UTF-8 bytes.
  */
 export function safeLocalFileName(name: string, maxLength = 120): string {
   const trimEdges = (value: string) => value.trim().replace(/^[.\s]+/, '').replace(/[.\s]+$/, '');
@@ -187,13 +190,16 @@ export function safeLocalFileName(name: string, maxLength = 120): string {
   if (!cleaned) return 'file';
   if (windowsReservedNames.test(cleaned.split('.')[0].trim())) cleaned = `_${cleaned}`;
 
-  if (cleaned.length <= maxLength) return cleaned;
+  if (cleaned.length <= maxLength && Buffer.byteLength(cleaned, 'utf8') <= 255) return cleaned;
   const dot = cleaned.lastIndexOf('.');
   const extension = dot > 0 && cleaned.length - dot <= 16 ? cleaned.slice(dot) : '';
   let stem = '';
+  let bytes = Buffer.byteLength(extension, 'utf8');
   for (const char of extension ? cleaned.slice(0, dot) : cleaned) {
-    if (stem.length + char.length > maxLength - extension.length) break;
+    const charBytes = Buffer.byteLength(char, 'utf8');
+    if (stem.length + char.length > maxLength - extension.length || bytes + charBytes > 255) break;
     stem += char;
+    bytes += charBytes;
   }
   return (trimEdges(stem) || 'file') + extension;
 }

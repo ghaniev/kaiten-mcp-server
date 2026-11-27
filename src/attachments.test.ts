@@ -136,6 +136,10 @@ test('decodes UTF-8 and BOM-marked UTF-16 text and rejects binary content', () =
   assert.equal(decodeTextFile(Buffer.from('\uFEFFa\0b', 'utf16le')), null);
 });
 
+test('an ASCII-only PDF is saved as a file instead of returned as text', () => {
+  assert.equal(decodeTextFile(Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF')), null);
+});
+
 test('turns a file name into one safe local path segment', () => {
   assert.equal(safeLocalFileName('ПЛАН-proto-migration.md'), 'ПЛАН-proto-migration.md');
   assert.equal(safeLocalFileName('../../etc/passwd'), '_.._etc_passwd');
@@ -158,6 +162,12 @@ test('keeps file names valid on Windows', () => {
   const emoji = safeLocalFileName(`${'😀'.repeat(130)}.txt`);
   assert.equal(emoji, `${'😀'.repeat(58)}.txt`);
   assert.equal(safeLocalFileName('0123456789'.repeat(5), 40), '0123456789'.repeat(4));
+});
+
+test('file names also fit the Linux byte limit without losing the extension', () => {
+  const name = safeLocalFileName(`${'報'.repeat(120)}.pdf`);
+  assert.ok(Buffer.byteLength(name, 'utf8') <= 255);
+  assert.ok(name.endsWith('.pdf'));
 });
 
 test('pages text by offsets without splitting surrogate pairs', () => {
