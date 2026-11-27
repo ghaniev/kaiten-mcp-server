@@ -8,8 +8,9 @@ import { setupLoggingMiddleware } from './middleware/logging-middleware.js';
 import {
   inferImageMimeType,
   isSafeImageDownloadUrl,
+  normalizeMimeType,
   resolveDownloadedImageMimeType,
-  validateImageSize,
+  validateFileSize,
 } from './attachments.js';
 
 // ============================================
@@ -170,6 +171,12 @@ export interface DownloadedKaitenImage {
   file: KaitenFile;
   data: Buffer;
   mimeType: string;
+}
+
+export interface DownloadedKaitenFile {
+  file: KaitenFile;
+  data: Buffer;
+  contentType: string | null;
 }
 
 export interface KaitenComment {
@@ -636,40 +643,132 @@ export class KaitenClient {
     file: KaitenFile,
     signal?: AbortSignal,
   ): Promise<DownloadedKaitenImage> {
-    const inferredMimeType = inferImageMimeType(file);
-    if (!inferredMimeType) {
+    if (!inferImageMimeType(file)) {
       throw new KaitenError(
         KaitenErrorType.VALIDATION_ERROR,
         `Unsupported image type: ${file.name}`,
       );
     }
 
-    validateImageSize(file, 0, config.KAITEN_MAX_IMAGE_BYTES);
-    const downloadUrl = await this.resolveFileDownloadUrl(card, file, signal);
-    this.assertSafeDownloadUrl(downloadUrl);
-
-    const response = await axios.get<ArrayBuffer>(downloadUrl, {
-      responseType: 'arraybuffer',
+    const { data, contentType } = await this.fetchCardFile(
+      card,
+      file,
+      config.KAITEN_MAX_IMAGE_BYTES,
+      'image',
       signal,
-      timeout: config.KAITEN_REQUEST_TIMEOUT_MS,
-      maxContentLength: config.KAITEN_MAX_IMAGE_BYTES,
-      maxBodyLength: config.KAITEN_MAX_IMAGE_BYTES,
-      maxRedirects: 0,
-      headers: { Accept: 'image/png,image/jpeg,image/webp,image/gif' },
-    });
-    const data = Buffer.from(response.data);
-    validateImageSize(file, data.byteLength, config.KAITEN_MAX_IMAGE_BYTES);
-
+      'image/png,image/jpeg,image/webp,image/gif',
+    );
     return {
       file,
       data,
-      mimeType: resolveDownloadedImageMimeType(
-        file,
-        response.headers['content-type'] == null
-          ? null
-          : String(response.headers['content-type']),
-      ),
+      mimeType: resolveDownloadedImageMimeType(file, contentType),
     };
+  }
+
+  async downloadCardFile(
+    card: KaitenCard,
+    file: KaitenFile,
+    signal?: AbortSignal,
+  ): Promise<DownloadedKaitenFile> {
+    const { data, contentType } = await this.fetchCardFile(
+      card,
+      file,
+      config.KAITEN_MAX_FILE_BYTES,
+      'file',
+      signal,
+    );
+    return { file, data, contentType };
+  }
+
+  /**
+   * Downloads an attachment body from the file host (not the Kaiten API: no token, no retries).
+   * Redirects are not followed, so the URL checked by assertSafeDownloadUrl is the one fetched.
+   */
+  private async fetchCardFile(
+    card: KaitenCard,
+    file: KaitenFile,
+    maxBytes: number,
+    limitKind: 'image' | 'file',
+    signal?: AbortSignal,
+    accept?: string,
+  ): Promise<{ data: Buffer; contentType: string | null }> {
+    const checkSize = (actualSize: number) => {
+      try {
+        validateFileSize(file, actualSize, maxBytes, limitKind);
+      } catch (error) {
+        throw new KaitenError(
+          KaitenErrorType.VALIDATION_ERROR,
+          (error as Error).message,
+          undefined,
+          undefined,
+          limitKind === 'file'
+            ? 'Raise KAITEN_MAX_FILE_BYTES or open the file in Kaiten'
+            : 'Raise KAITEN_MAX_IMAGE_BYTES or save it with kaiten_get_card_file',
+        );
+      }
+    };
+    checkSize(0);
+    const downloadUrl = await this.resolveFileDownloadUrl(card, file, signal);
+    this.assertSafeDownloadUrl(downloadUrl);
+
+    let response;
+    try {
+      response = await axios.get<ArrayBuffer>(downloadUrl, {
+        responseType: 'arraybuffer',
+        signal,
+        timeout: config.KAITEN_REQUEST_TIMEOUT_MS,
+        maxContentLength: maxBytes,
+        maxBodyLength: maxBytes,
+        maxRedirects: 0,
+        headers: accept ? { Accept: accept } : undefined,
+      });
+    } catch (error) {
+      throw this.fileDownloadError(file, error, maxBytes, limitKind);
+    }
+    const data = Buffer.from(response.data);
+    checkSize(data.byteLength);
+
+    const contentType = response.headers['content-type'];
+    return {
+      data,
+      contentType: normalizeMimeType(contentType == null ? null : String(contentType)),
+    };
+  }
+
+  /** Short, readable error instead of the global handler's dump of a Buffer body as bytes. */
+  private fileDownloadError(
+    file: KaitenFile,
+    error: unknown,
+    maxBytes: number,
+    limitKind: 'image' | 'file',
+  ): Error {
+    if (!axios.isAxiosError(error)) return error as Error;
+    if (error.message.includes('maxContentLength')) {
+      return new KaitenError(
+        KaitenErrorType.VALIDATION_ERROR,
+        `${file.name} exceeds the ${maxBytes}-byte ${limitKind} limit`,
+      );
+    }
+    const status = error.response?.status;
+    if (status === undefined) {
+      return new KaitenError(
+        error.code === 'ECONNABORTED' ? KaitenErrorType.TIMEOUT : KaitenErrorType.NETWORK_ERROR,
+        `Could not download ${file.name}: ${error.message}`,
+      );
+    }
+    const body = error.response?.data;
+    const bodyText = body == null
+      ? ''
+      : Buffer.from(body as ArrayBuffer).toString('utf8').replace(/\s+/g, ' ').trim().slice(0, 200);
+    return new KaitenError(
+      KaitenErrorType.API_ERROR,
+      `Could not download ${file.name}: file host answered HTTP ${status}`,
+      status,
+      bodyText ? { body: bodyText } : undefined,
+      status >= 300 && status < 400
+        ? 'The file host redirected; redirects are not followed for safety'
+        : 'Check that the attachment still opens in Kaiten',
+    );
   }
 
   private async resolveFileDownloadUrl(
@@ -722,7 +821,7 @@ export class KaitenClient {
       })();
       throw new KaitenError(
         KaitenErrorType.VALIDATION_ERROR,
-        `Unsafe image download URL returned for host ${hostname}`,
+        `Unsafe file download URL returned for host ${hostname}`,
       );
     }
   }

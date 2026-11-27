@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server for Kaiten API integration. It provides 62 tools for managing Kaiten cards, members, blockers, checklists, tags, external links, card order, comments, spaces, and boards directly from Claude Desktop. The server is production-ready with comprehensive logging, caching, retry logic, and concurrency control.
+This is an MCP (Model Context Protocol) server for Kaiten API integration. It provides 63 tools for managing Kaiten cards, members, blockers, checklists, tags, external links, card order, comments, spaces, and boards directly from Claude Desktop. The server is production-ready with comprehensive logging, caching, retry logic, and concurrency control.
 
 **Current Version:** 2.3.0
 
@@ -48,7 +48,7 @@ Reference: src/config.ts:126-152 implements the `safeLog` wrapper.
 
 1. **src/index.ts** (main MCP server)
    - Implements MCP Server with stdio transport
-   - Defines 62 tool handlers (cards, members/responsible, blockers, checklists, tags, external links, order, bulk, comments, spaces, boards, cache, logging)
+   - Defines 63 tool handlers (cards, members/responsible, blockers, checklists, tags, external links, order, bulk, comments, spaces, boards, cache, logging)
    - Implements MCP Resources (kaiten-card:///, kaiten-space:///, etc.)
    - Implements Server Prompts with usage instructions
    - Uses Zod schemas for all tool parameter validation
@@ -124,6 +124,13 @@ Reference: src/config.ts:126-152 implements the `safeLog` wrapper.
 - No list endpoint: checklists come embedded in `GET /cards/{id}` (key absent when there are none).
 - Item tools take only `item_id`; the checklist is resolved from the card via `findItemChecklist()`.
 - Items are always projected (`projectChecklist()`): the raw ones embed users with base64 avatars.
+
+**Attachments Pattern (src/attachments.ts, src/local-files.ts):**
+- Files come embedded in `GET /cards/{id}` (`files`); bodies are fetched from the file host by
+  `KaitenClient.fetchCardFile()` (HTTPS only, no private hosts, no redirects, size-capped).
+- `kaiten_get_card_file` saves non-text files through `saveAttachmentLocally()`: a per-uid 0700
+  folder in the temp dir (plain `%TEMP%` folder on Windows), names cleaned by `safeLocalFileName()`
+  for Windows too. Keep both platforms in mind when touching paths.
 
 **Card Operations Pattern (src/card-ops.ts):**
 - The assignee is a card MEMBER with `type: 2`; `owner` is who set the task.
